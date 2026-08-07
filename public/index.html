@@ -18,7 +18,7 @@
 <body class="bg-[#F4EFE4]">
 <div id="root"></div>
 
-<script type="text/babel" data-presets="react">
+<script type="text/plain" id="app-source">
 const { useState, useEffect, useMemo, useCallback } = React;
 
 const BRANCHES = ["Store", "FB", "North"];
@@ -831,12 +831,18 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-</script>
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+   </script>
 
-<script>
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}); });
+   <script>
+   (function () {
+     var code = document.getElementById("app-source").textContent;
+     var compiled = Babel.transform(code, { presets: ["react"] }).code;
+     var script = document.createElement("script");
+     script.textContent = compiled;
+     document.body.appendChild(script);
+   })();
+   if ('serviceWorker' in navigator) {  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}); });
 }
 </script>
 </body>
