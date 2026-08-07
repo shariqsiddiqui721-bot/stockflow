@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>StockFlow</title>
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#1F2A24" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; }
+  input[type=number]::-webkit-inner-spin-button { opacity: 1; }
+</style>
+</head>
+<body class="bg-[#F4EFE4]">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+const BRANCHES = ["Store", "FB", "North"];
+const ALL_PERMISSIONS = ["purchase", "issue", "ending", "demand", "payment", "reports", "admin"];
+const uid = (p) => p + Math.random().toString(36).slice(2, 9);
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const nowStr = () => new Date().toLocaleString();
+const money = (n) => "Rs " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+async function apiGet() {
+  const r = await fetch("/api/state");
+  return r.json();
+}
+async function apiSave(data) {
+  await fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+}
+
+function toCSV(rows, headers) {
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [headers.map(h => esc(h.label)).join(",")];
+  rows.forEach(r => lines.push(headers.map(h => esc(h.get(r))).join(",")));
+  return lines.join("\n");
+}
+function downloadCSV(filename, csv) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Resolve how an item should be priced for a given supplier.
+// Returns null for plain manual entry, or an object describing fixed/formula pricing.
+function computeRate(db, supplierId, itemId) {
+  const cfg = db.pricing && db.pricing[supplierId] && db.pricing[supplierId][itemId];
+  if (!cfg || cfg.mode === "manual") return null;
+  const item = db.items.find(i => i.id === itemId);
+  if (cfg.mode === "fixed") {
+    return { mode: "fixed", rate: Number(cfg.rate) || 0, cashOnly: !!cfg.cashOnly };
+  }
+  if (cfg.mode === "formula") {
+    const tr = db.todayRates && db.todayRates[item.category];
+    const fresh = tr && tr.date === todayStr();
+    if (!fresh) {
+      return { mode: "formula", needsToday: true, cashOnly: !!cfg.cashOnly, offset: Number(cfg.offset) || 0, multiplier: Number(cfg.multiplier) || 1, category: item.category };
+    }
+    const rate = (Number(cfg.offset || 0) + Number(tr.rate)) * Number(cfg.multiplier || 1);
+    return { mode: "formula", rate, cashOnly: !!cfg.cashOnly, category: item.category, todayRate: Number(tr.rate) };
+  }
+  return null;
+}
+
+/* ---------- UI atoms ---------- */
+
+function TopBar({ title, onBack }) {
+  return (
+    <div className="sticky top-0 z-10 bg-[#1F2A24] text-[#F4EFE4] px-4 py-3 flex items-center gap-3 shadow-md">
+      {onBack && (
+        <button onClick={onBack} className="p-1.5 -ml-1.5 rounded-full active:bg-white/10 text-xl leading-none">‹</button>
+      )}
+      <div className="flex-1 min-w-0">
+        <div className="text-[10px] uppercase tracking-[0.2em] text-[#C98A2C] font-semibold">StockFlow</div>
+        <div className="text-lg font-bold truncate leading-tight">{title}</div>
+      </div>
+    </div>
+  );
+}
+function Field({ label, children }) {
+  return (
+    <label className="block mb-4">
+      <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">{label}</div>
+      {children}
+    </label>
+  );
+}
+const selCls = "w-full bg-white border-2 border-[#D8D2C2] rounded-xl px-4 py-3.5 text-[16px] text-[#1F2A24] font-medium focus:outline-none focus:border-[#C98A2C] appearance-none";
+const numCls = "w-full bg-white border-2 border-[#D8D2C2] rounded-xl px-4 py-3.5 text-[16px] font-mono font-semibold text-[#1F2A24] focus:outline-none focus:border-[#C98A2C]";
+const btnPrimary = "w-full bg-[#C98A2C] active:bg-[#B37723] text-white font-bold text-[16px] py-4 rounded-xl shadow-sm disabled:opacity-40 disabled:pointer-events-none";
+
+function Toast({ msg, kind }) {
+  if (!msg) return null;
+  const ok = kind !== "error";
+  return (
+    <div className={`fixed top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-full shadow-lg text-sm font-semibold ${ok ? "bg-[#2B6E63] text-white" : "bg-[#B33A3A] text-white"}`}>
+      {msg}
+    </div>
+  );
+}
+
+function PermChips({ selected, onToggle }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {ALL_PERMISSIONS.map(p => (
+        <button key={p} type="button" onClick={() => onToggle(p)}
+          className={`px-2.5 py-1 rounded-full text-xs font-semibold border capitalize ${selected.includes(p) ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>
+          {p}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ---------- App ---------- */
+
+function App() {
+  const [db, setDb] = useState(null);
+  const [session, setSession] = useState(null);
+  const [screen, setScreen] = useState("menu");
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => { apiGet().then(setDb).catch(() => setToast({ msg: "Could not connect to server", kind: "error" })); }, []);
+
+  useEffect(() => {
+    if (!["menu", "reports"].includes(screen)) return;
+    const t = setInterval(() => { apiGet().then(setDb).catch(() => {}); }, 5000);
+    return () => clearInterval(t);
+  }, [screen]);
+
+  const persist = useCallback(async (next) => {
+    setDb(next);
+    try { await apiSave(next); } catch { /* best effort */ }
+  }, []);
+
+  const flash = (msg, kind = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 2200); };
+  const addLog = (dbNext, action, detail) => {
+    dbNext.log = [{ id: uid("l"), at: nowStr(), user: session?.name || "-", action, detail }, ...dbNext.log].slice(0, 2000);
+  };
+
+  const stockOf = useMemo(() => (branch, itemId) => {
+    if (!db) return 0;
+    let qty = 0;
+    if (branch === "Store") db.purchases.forEach(p => { if (p.itemId === itemId) qty += Number(p.qty); });
+    db.issues.forEach(iss => {
+      if (iss.itemId !== itemId) return;
+      if (iss.from === branch) qty -= Number(iss.qty);
+      if (iss.to === branch) qty += Number(iss.qty);
+    });
+    return qty;
+  }, [db]);
+
+  const balanceOf = useMemo(() => (supplierId) => {
+    if (!db) return 0;
+    const owed = db.purchases.filter(p => p.supplierId === supplierId && p.paymentMode === "credit").reduce((a, p) => a + p.amount, 0);
+    const paid = (db.payments || []).filter(x => x.supplierId === supplierId).reduce((a, x) => a + x.amount, 0);
+    return owed - paid;
+  }, [db]);
+
+  const lastBillOf = useMemo(() => (supplierId) => {
+    if (!db) return null;
+    const list = db.purchases.filter(p => p.supplierId === supplierId);
+    return list.length ? list[0] : null; // purchases are prepended, so first = latest
+  }, [db]);
+
+  if (!db) return <div className="min-h-screen flex items-center justify-center text-[#1F2A24] font-semibold">Loading…</div>;
+  if (!session) return <LoginScreen db={db} onLogin={(u) => { setSession(u); setScreen("menu"); }} />;
+
+  const commonProps = { db, session, persist, addLog, flash, stockOf, balanceOf, lastBillOf, setScreen };
+
+  return (
+    <div className="min-h-screen bg-[#F4EFE4] pb-8">
+      <Toast msg={toast?.msg} kind={toast?.kind} />
+      {screen === "menu" && <MainMenu session={session} onLogout={() => setSession(null)} setScreen={setScreen} />}
+      {screen === "purchase" && <PurchaseScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "issue" && <IssueScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "ending" && <EndingScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "demand" && <DemandScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "payment" && <PaymentScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "reports" && <ReportsScreen {...commonProps} onBack={() => setScreen("menu")} />}
+      {screen === "admin" && <AdminScreen {...commonProps} onBack={() => setScreen("menu")} />}
+    </div>
+  );
+}
+
+/* ---------- Login ---------- */
+
+function LoginScreen({ db, onLogin }) {
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const press = (d) => {
+    setErr("");
+    const next = (pin + d).slice(0, 6);
+    setPin(next);
+    const match = db.users.find(u => u.pin === next);
+    if (match) setTimeout(() => onLogin(match), 120);
+  };
+  const back = () => setPin(pin.slice(0, -1));
+  useEffect(() => {
+    if (pin.length === 6 && !db.users.find(u => u.pin === pin)) {
+      setErr("Incorrect PIN"); setTimeout(() => setPin(""), 500);
+    }
+  }, [pin]);
+
+  return (
+    <div className="min-h-screen bg-[#1F2A24] flex flex-col items-center justify-center px-6">
+      <div className="text-2xl font-black tracking-tight text-[#F4EFE4] mb-1">🏭 StockFlow</div>
+      <div className="text-[#8FA096] text-sm mb-8">Enter your PIN to continue</div>
+      <div className="flex gap-3 mb-2 h-4">
+        {Array.from({ length: Math.max(pin.length, 4) }).map((_, i) => (
+          <div key={i} className={`w-3.5 h-3.5 rounded-full border-2 ${i < pin.length ? "bg-[#C98A2C] border-[#C98A2C]" : "border-[#4A5952]"}`} />
+        ))}
+      </div>
+      <div className="text-xs h-5 mb-4 font-semibold" style={{ color: err ? "#E8877A" : "transparent" }}>{err || "-"}</div>
+      <div className="grid grid-cols-3 gap-4 w-full max-w-[280px]">
+        {[1,2,3,4,5,6,7,8,9].map(d => (
+          <button key={d} onClick={() => press(String(d))} className="aspect-square rounded-full bg-[#2C3931] active:bg-[#3A4A40] text-[#F4EFE4] text-2xl font-bold">{d}</button>
+        ))}
+        <div />
+        <button onClick={() => press("0")} className="aspect-square rounded-full bg-[#2C3931] active:bg-[#3A4A40] text-[#F4EFE4] text-2xl font-bold">0</button>
+        <button onClick={back} className="aspect-square rounded-full flex items-center justify-center text-[#8FA096] active:text-white text-xl">⌫</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Main Menu ---------- */
+
+function MainMenu({ session, onLogout, setScreen }) {
+  const perms = session.permissions || [];
+  const tiles = [
+    { key: "purchase", label: "Purchase", sub: "Record stock in", emoji: "📦", color: "#C98A2C" },
+    { key: "issue", label: "Issue", sub: "Move to branches", emoji: "🔀", color: "#2B6E63" },
+    { key: "ending", label: "Ending", sub: "Closing count", emoji: "📋", color: "#4A6FA5" },
+    { key: "demand", label: "Demand", sub: "Request items", emoji: "🧾", color: "#B3562C" },
+    { key: "payment", label: "Payment", sub: "Pay suppliers", emoji: "💰", color: "#7A5C2E" },
+  ].filter(t => perms.includes(t.key));
+
+  return (
+    <div>
+      <div className="bg-[#1F2A24] text-[#F4EFE4] px-5 pt-6 pb-8 rounded-b-[28px] shadow-md">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-[#C98A2C] font-semibold">StockFlow</div>
+            <div className="text-2xl font-black">Hi, {session.name}</div>
+          </div>
+          <button onClick={onLogout} className="p-2.5 rounded-full bg-white/10 active:bg-white/20 text-lg">⎋</button>
+        </div>
+      </div>
+      {tiles.length === 0 && (
+        <div className="px-5 mt-6 text-center text-[#7A8880] text-sm">No options assigned to your account yet. Ask your admin.</div>
+      )}
+      <div className="px-5 -mt-4 grid grid-cols-2 gap-4">
+        {tiles.map(t => (
+          <button key={t.key} onClick={() => setScreen(t.key)} className="bg-white rounded-2xl p-5 shadow-md text-left active:scale-[0.98] border border-[#EAE4D4]">
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-3 text-xl" style={{ background: t.color + "1A" }}>{t.emoji}</div>
+            <div className="font-bold text-[#1F2A24] text-lg leading-tight">{t.label}</div>
+            <div className="text-xs text-[#7A8880] mt-0.5">{t.sub}</div>
+          </button>
+        ))}
+      </div>
+      <div className="px-5 mt-4 grid grid-cols-2 gap-4">
+        {perms.includes("reports") && (
+          <button onClick={() => setScreen("reports")} className="bg-white rounded-2xl p-4 shadow-sm border border-[#EAE4D4] flex items-center gap-3 active:scale-[0.98]">
+            <span>🔎</span><span className="font-semibold text-[#1F2A24]">Reports</span>
+          </button>
+        )}
+        {perms.includes("admin") && (
+          <button onClick={() => setScreen("admin")} className="bg-white rounded-2xl p-4 shadow-sm border border-[#EAE4D4] flex items-center gap-3 active:scale-[0.98]">
+            <span>🛡️</span><span className="font-semibold text-[#1F2A24]">Admin</span>
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Purchase ---------- */
+
+function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
+  const [category, setCategory] = useState(db.categories[0]);
+  const [itemId, setItemId] = useState("");
+  const [supplierId, setSupplierId] = useState("");
+  const [qty, setQty] = useState("");
+  const [rate, setRate] = useState("");
+  const [payMode, setPayMode] = useState("credit");
+  const [todayInput, setTodayInput] = useState("");
+
+  const items = db.items.filter(i => i.category === category);
+  useEffect(() => { setItemId(items[0]?.id || ""); }, [category]);
+  const suppliers = db.suppliers.filter(s => s.itemIds.includes(itemId));
+  useEffect(() => { setSupplierId(suppliers[0]?.id || ""); }, [itemId]);
+
+  const pricing = supplierId && itemId ? computeRate(db, supplierId, itemId) : null;
+  const item = db.items.find(i => i.id === itemId);
+
+  useEffect(() => {
+    if (pricing && pricing.rate !== undefined) { setRate(String(pricing.rate)); }
+    if (pricing && pricing.cashOnly) setPayMode("cash");
+    if (!pricing) setRate("");
+  }, [supplierId, itemId, db.todayRates]);
+
+  const amount = (Number(qty) || 0) * (Number(rate) || 0);
+
+  const saveTodayRate = () => {
+    if (!todayInput || Number(todayInput) <= 0) { flash("Enter a valid rate", "error"); return; }
+    const next = { ...db, todayRates: { ...db.todayRates, [pricing.category]: { date: todayStr(), rate: Number(todayInput) } } };
+    addLog(next, "Today's Rate", `${pricing.category} rate set to ${todayInput}`);
+    persist(next);
+    setTodayInput("");
+    flash("Today's rate saved");
+  };
+
+  const save = () => {
+    if (!itemId || !supplierId || !qty || !rate) { flash("Fill all fields", "error"); return; }
+    const rec = { id: uid("p"), date: todayStr(), itemId, supplierId, qty: Number(qty), rate: Number(rate), amount, paymentMode: payMode, userId: session.id };
+    const next = { ...db, purchases: [rec, ...db.purchases] };
+    addLog(next, "Purchase", `${item.name} x${qty} @ ${rate} (${payMode}) from ${db.suppliers.find(s=>s.id===supplierId)?.name}`);
+    persist(next); flash("Purchase saved"); setQty("");
+  };
+
+  return (
+    <div>
+      <TopBar title="Purchase" onBack={onDone} />
+      <div className="p-5">
+        <Field label="Item Category">
+          <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select>
+        </Field>
+        <Field label="Item">
+          <select className={selCls} value={itemId} onChange={e => setItemId(e.target.value)}>{items.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}</select>
+        </Field>
+        <Field label="Supplier">
+          <select className={selCls} value={supplierId} onChange={e => setSupplierId(e.target.value)}>
+            {suppliers.length === 0 && <option value="">No supplier linked</option>}
+            {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+
+        {pricing && pricing.needsToday && (
+          <div className="bg-[#FBF0DD] border-2 border-[#C98A2C] rounded-xl p-3.5 mb-4">
+            <div className="text-sm font-semibold text-[#7A5C2E] mb-2">Set today's {pricing.category} rate first</div>
+            <div className="flex gap-2">
+              <input className={numCls} type="number" inputMode="decimal" placeholder="e.g. 450" value={todayInput} onChange={e => setTodayInput(e.target.value)} />
+              <button onClick={saveTodayRate} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Set</button>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={`Quantity (${item?.unit || ""})`}><input className={numCls} type="number" inputMode="decimal" value={qty} onChange={e => setQty(e.target.value)} placeholder="0" /></Field>
+          <Field label={pricing && pricing.mode === "fixed" ? "Rate (fixed)" : pricing && pricing.mode === "formula" ? `Rate (formula, today ${pricing.todayRate ?? "-"})` : "Rate"}>
+            <input className={numCls} type="number" inputMode="decimal" value={rate}
+              onChange={e => setRate(e.target.value)}
+              readOnly={!!(pricing && (pricing.mode === "fixed" || (pricing.mode === "formula" && !pricing.needsToday)))}
+              placeholder="0" />
+          </Field>
+        </div>
+
+        <Field label="Payment">
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" disabled={pricing && pricing.cashOnly === false ? false : false}
+              onClick={() => !(pricing && pricing.cashOnly) && setPayMode("credit")}
+              className={`py-3 rounded-xl font-semibold border-2 ${payMode === "credit" ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"} ${pricing && pricing.cashOnly ? "opacity-40 pointer-events-none" : ""}`}>
+              Credit (Udhaar)
+            </button>
+            <button type="button" onClick={() => setPayMode("cash")}
+              className={`py-3 rounded-xl font-semibold border-2 ${payMode === "cash" ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>
+              Cash
+            </button>
+          </div>
+          {pricing && pricing.cashOnly && <div className="text-xs text-[#B3562C] font-semibold mt-1.5">This supplier/item is cash-only</div>}
+        </Field>
+
+        <div className="bg-[#2C3931] text-[#F4EFE4] rounded-xl p-4 mb-5 flex items-center justify-between">
+          <span className="text-sm font-semibold text-[#C98A2C] uppercase tracking-wide">Amount</span>
+          <span className="text-xl font-mono font-bold">{money(amount)}</span>
+        </div>
+        <button className={btnPrimary} onClick={save} disabled={pricing && pricing.needsToday}>Save Purchase</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Shared grid ---------- */
+
+function ItemQtyGrid({ items, values, setValues, stockCheck }) {
+  return (
+    <div className="space-y-2.5">
+      {items.map(it => {
+        const val = values[it.id] || "";
+        const avail = stockCheck ? stockCheck(it.id) : null;
+        const over = stockCheck && Number(val) > avail;
+        return (
+          <div key={it.id} className={`bg-white rounded-xl p-3 border-2 flex items-center justify-between gap-3 ${over ? "border-[#B33A3A]" : "border-[#EAE4D4]"}`}>
+            <div className="min-w-0">
+              <div className="font-semibold text-[#1F2A24] truncate">{it.name}</div>
+              <div className="text-[11px] text-[#8A9690]">{it.unit}{stockCheck && <span className={over ? "text-[#B33A3A] font-bold" : ""}> · {avail} in stock</span>}</div>
+            </div>
+            <input className="w-24 bg-[#F7F5F0] border-2 border-[#D8D2C2] rounded-lg px-2 py-2 text-right font-mono font-bold text-[16px] focus:outline-none focus:border-[#C98A2C]"
+              type="number" inputMode="decimal" placeholder="0" value={val} onChange={e => setValues(v => ({ ...v, [it.id]: e.target.value }))} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---------- Issue ---------- */
+
+function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
+  const [from, setFrom] = useState("Store");
+  const [to, setTo] = useState("FB");
+  const [category, setCategory] = useState(db.categories[0]);
+  const [values, setValues] = useState({});
+  const items = db.items.filter(i => i.category === category);
+  useEffect(() => { setValues({}); }, [category, from, to]);
+  const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
+  const anyOver = entries.some(([id, v]) => Number(v) > stockOf(from, id));
+
+  const save = () => {
+    if (from === to) { flash("From and To must differ", "error"); return; }
+    if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
+    if (anyOver) { flash("Not enough stock for one or more items", "error"); return; }
+    const recs = entries.map(([itemId, v]) => ({ id: uid("iss"), date: todayStr(), from, to, itemId, qty: Number(v), userId: session.id }));
+    const next = { ...db, issues: [...recs, ...db.issues] };
+    addLog(next, "Issue", `${from} → ${to}: ${entries.length} item(s)`);
+    persist(next); flash("Issue saved"); setValues({});
+  };
+
+  return (
+    <div>
+      <TopBar title="Issue" onBack={onDone} />
+      <div className="p-5">
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Issue From"><select className={selCls} value={from} onChange={e => setFrom(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select></Field>
+          <Field label="Issue To"><select className={selCls} value={to} onChange={e => setTo(e.target.value)}>{BRANCHES.filter(b => b !== from).map(b => <option key={b}>{b}</option>)}</select></Field>
+        </div>
+        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Items & Quantity</div>
+        <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} stockCheck={(id) => stockOf(from, id)} /></div>
+        <button className={btnPrimary} onClick={save}>Save Issue</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Ending ---------- */
+
+function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
+  const [branch, setBranch] = useState("Store");
+  const [category, setCategory] = useState(db.categories[0]);
+  const [values, setValues] = useState({});
+  const items = db.items.filter(i => i.category === category);
+  useEffect(() => { setValues({}); }, [category, branch]);
+  const entries = Object.entries(values).filter(([, v]) => v !== "" && v !== undefined);
+
+  const save = () => {
+    if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
+    const recs = entries.map(([itemId, v]) => ({ id: uid("end"), date: todayStr(), branch, itemId, qty: Number(v), userId: session.id }));
+    const next = { ...db, endings: [...recs, ...db.endings] };
+    addLog(next, "Ending", `${branch}: ${entries.length} item(s)`);
+    persist(next); flash("Ending saved"); setValues({});
+  };
+
+  return (
+    <div>
+      <TopBar title="Ending" onBack={onDone} />
+      <div className="p-5">
+        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select></Field>
+        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Closing Count</div>
+        <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
+        <button className={btnPrimary} onClick={save}>Save Ending</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Demand ---------- */
+
+function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
+  const [branch, setBranch] = useState("FB");
+  const [category, setCategory] = useState(db.categories[0]);
+  const [values, setValues] = useState({});
+  const items = db.items.filter(i => i.category === category);
+  useEffect(() => { setValues({}); }, [category, branch]);
+  const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
+
+  const save = () => {
+    if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
+    const recs = entries.map(([itemId, v]) => ({ id: uid("dem"), date: todayStr(), branch, itemId, qty: Number(v), userId: session.id }));
+    const next = { ...db, demands: [...recs, ...db.demands] };
+    addLog(next, "Demand", `${branch}: ${entries.length} item(s)`);
+    persist(next); flash("Demand saved"); setValues({});
+  };
+
+  return (
+    <div>
+      <TopBar title="Demand" onBack={onDone} />
+      <div className="p-5">
+        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select></Field>
+        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Quantity Required</div>
+        <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
+        <button className={btnPrimary} onClick={save}>Save Demand</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Payment ---------- */
+
+function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBillOf, onDone }) {
+  const [supplierId, setSupplierId] = useState(db.suppliers[0]?.id || "");
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const supplier = db.suppliers.find(s => s.id === supplierId);
+  const balance = supplierId ? balanceOf(supplierId) : 0;
+  const lastBill = supplierId ? lastBillOf(supplierId) : null;
+  const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
+
+  const save = () => {
+    if (!supplierId || !amount || Number(amount) <= 0) { flash("Select supplier and enter amount", "error"); return; }
+    const rec = { id: uid("pay"), date: todayStr(), supplierId, amount: Number(amount), note, userId: session.id };
+    const next = { ...db, payments: [rec, ...(db.payments || [])] };
+    addLog(next, "Payment", `Paid ${amount} to ${supplier?.name}`);
+    persist(next); flash("Payment saved"); setAmount(""); setNote("");
+  };
+
+  return (
+    <div>
+      <TopBar title="Payment" onBack={onDone} />
+      <div className="p-5">
+        <Field label="Supplier">
+          <select className={selCls} value={supplierId} onChange={e => setSupplierId(e.target.value)}>
+            {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3 mb-5">
+          <div className={`rounded-xl p-3.5 border-2 ${balance > 0 ? "bg-[#FBEAEA] border-[#E4B8B8]" : "bg-[#EAF3F1] border-[#B8D8D2]"}`}>
+            <div className="text-[10px] uppercase tracking-wide font-semibold text-[#5C6B62] mb-1">Balance Due</div>
+            <div className={`text-lg font-mono font-bold ${balance > 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{money(balance)}</div>
+          </div>
+          <div className="rounded-xl p-3.5 border-2 bg-white border-[#EAE4D4]">
+            <div className="text-[10px] uppercase tracking-wide font-semibold text-[#5C6B62] mb-1">Last Bill</div>
+            {lastBill ? (
+              <div>
+                <div className="text-lg font-mono font-bold text-[#1F2A24]">{money(lastBill.amount)}</div>
+                <div className="text-[11px] text-[#8A9690]">{itemName(lastBill.itemId)} · {lastBill.date}</div>
+              </div>
+            ) : <div className="text-sm text-[#8A9690]">No bills yet</div>}
+          </div>
+        </div>
+
+        <Field label="Payment Amount">
+          <input className={numCls} type="number" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" />
+        </Field>
+        <Field label="Note (optional)">
+          <input className={numCls + " font-sans"} value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. cash paid at shop" />
+        </Field>
+        <button className={btnPrimary} onClick={save}>Save Payment</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Reports ---------- */
+
+const REPORT_TABS = ["Stock Balance", "Purchases", "Supplier Ledger", "Demand vs Issue", "Activity Log"];
+
+function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
+  const [tab, setTab] = useState(REPORT_TABS[0]);
+  const [q, setQ] = useState("");
+  const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
+  const supplierName = (id) => db.suppliers.find(s => s.id === id)?.name || id;
+  const filteredItems = db.items.filter(i => i.name.toLowerCase().includes(q.toLowerCase()));
+
+  return (
+    <div>
+      <TopBar title="Reports" onBack={onBack} />
+      <div className="px-4 pt-3">
+        <div className="flex gap-2 overflow-x-auto pb-2 -mx-1 px-1">
+          {REPORT_TABS.map(t => (
+            <button key={t} onClick={() => setTab(t)} className={`whitespace-nowrap px-3.5 py-2 rounded-full text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
+          ))}
+        </div>
+      </div>
+      <div className="px-4 mt-2 mb-3 relative">
+        <input className="w-full bg-white border-2 border-[#EAE4D4] rounded-xl pl-4 pr-3 py-2.5 text-sm" placeholder="Search item…" value={q} onChange={e => setQ(e.target.value)} />
+      </div>
+      <div className="px-4 pb-8">
+        {tab === "Stock Balance" && (
+          <ReportTable title="Stock Balance by Branch" onExport={() => downloadCSV("stock-balance.csv", toCSV(filteredItems, [{ label: "Item", get: i => i.name }, { label: "Category", get: i => i.category }, ...BRANCHES.map(b => ({ label: b, get: i => stockOf(b, i.id) }))]))}>
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th>{BRANCHES.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}</tr></thead>
+              <tbody>
+                {filteredItems.map(i => (
+                  <tr key={i.id} className="border-t border-[#EFEBDF]">
+                    <td className="py-2 font-medium">{i.name}</td>
+                    {BRANCHES.map(b => { const v = stockOf(b, i.id); return <td key={b} className={`text-right py-2 font-mono ${v < 0 ? "text-[#B33A3A]" : v <= 5 && v >= 0 ? "text-[#B3562C] font-bold" : ""}`}>{v}</td>; })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </ReportTable>
+        )}
+        {tab === "Purchases" && (
+          <ReportTable title="Purchase History" onExport={() => downloadCSV("purchases.csv", toCSV(db.purchases, [{ label: "Date", get: p => p.date }, { label: "Item", get: p => itemName(p.itemId) }, { label: "Supplier", get: p => supplierName(p.supplierId) }, { label: "Qty", get: p => p.qty }, { label: "Rate", get: p => p.rate }, { label: "Amount", get: p => p.amount }, { label: "Payment", get: p => p.paymentMode || "credit" }]))}>
+            {db.purchases.filter(p => itemName(p.itemId).toLowerCase().includes(q.toLowerCase())).slice(0, 200).map(p => (
+              <div key={p.id} className="bg-white rounded-xl p-3 mb-2 border border-[#EAE4D4] flex justify-between items-center">
+                <div><div className="font-semibold">{itemName(p.itemId)}</div><div className="text-xs text-[#8A9690]">{supplierName(p.supplierId)} · {p.date} · {p.paymentMode === "cash" ? "Cash" : "Credit"}</div></div>
+                <div className="text-right"><div className="font-mono font-bold">{money(p.amount)}</div><div className="text-xs text-[#8A9690]">{p.qty} × {p.rate}</div></div>
+              </div>
+            ))}
+          </ReportTable>
+        )}
+        {tab === "Supplier Ledger" && (
+          <ReportTable title="Supplier Ledger" onExport={() => downloadCSV("supplier-ledger.csv", toCSV(db.suppliers, [{ label: "Supplier", get: s => s.name }, { label: "Total Purchases", get: s => db.purchases.filter(p => p.supplierId === s.id).reduce((a, p) => a + p.amount, 0) }, { label: "Total Paid", get: s => (db.payments||[]).filter(x => x.supplierId === s.id).reduce((a, x) => a + x.amount, 0) }, { label: "Balance Due", get: s => balanceOf(s.id) }]))}>
+            {db.suppliers.map(s => {
+              const list = db.purchases.filter(p => p.supplierId === s.id);
+              const total = list.reduce((a, p) => a + p.amount, 0);
+              const bal = balanceOf(s.id);
+              return (
+                <div key={s.id} className="bg-white rounded-xl p-3 mb-2 border border-[#EAE4D4]">
+                  <div className="flex justify-between items-center">
+                    <div><div className="font-semibold">{s.name}</div><div className="text-xs text-[#8A9690]">{list.length} purchase(s) · Total {money(total)}</div></div>
+                    <div className={`font-mono font-bold ${bal > 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{money(bal)}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </ReportTable>
+        )}
+        {tab === "Demand vs Issue" && (
+          <ReportTable title="Demand vs Issue" onExport={() => downloadCSV("demand-vs-issue.csv", toCSV(filteredItems, [{ label: "Item", get: i => i.name }, { label: "Demanded", get: i => db.demands.filter(d => d.itemId === i.id).reduce((a, d) => a + d.qty, 0) }, { label: "Issued", get: i => db.issues.filter(x => x.itemId === i.id).reduce((a, x) => a + x.qty, 0) }]))}>
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Demanded</th><th className="text-right py-1.5">Issued</th></tr></thead>
+              <tbody>
+                {filteredItems.map(i => { const dem = db.demands.filter(d => d.itemId === i.id).reduce((a, d) => a + d.qty, 0); const iss = db.issues.filter(x => x.itemId === i.id).reduce((a, x) => a + x.qty, 0); if (dem === 0 && iss === 0) return null; return (
+                  <tr key={i.id} className="border-t border-[#EFEBDF]"><td className="py-2 font-medium">{i.name}</td><td className="text-right py-2 font-mono">{dem}</td><td className={`text-right py-2 font-mono ${iss < dem ? "text-[#B33A3A] font-bold" : ""}`}>{iss}</td></tr>
+                ); })}
+              </tbody>
+            </table>
+          </ReportTable>
+        )}
+        {tab === "Activity Log" && (
+          <ReportTable title="User Activity" onExport={() => downloadCSV("activity-log.csv", toCSV(db.log, [{ label: "Time", get: l => l.at }, { label: "User", get: l => l.user }, { label: "Action", get: l => l.action }, { label: "Detail", get: l => l.detail }]))}>
+            {db.log.slice(0, 200).map(l => (
+              <div key={l.id} className="bg-white rounded-xl p-3 mb-2 border border-[#EAE4D4]">
+                <div className="flex justify-between text-sm"><span className="font-semibold">{l.action}</span><span className="text-xs text-[#8A9690]">{l.at}</span></div>
+                <div className="text-xs text-[#5C6B62] mt-0.5">{l.user} · {l.detail}</div>
+              </div>
+            ))}
+          </ReportTable>
+        )}
+      </div>
+    </div>
+  );
+}
+function ReportTable({ title, onExport, children }) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-bold text-[#1F2A24]">{title}</div>
+        <button onClick={onExport} className="text-xs font-semibold text-[#2B6E63] bg-[#2B6E63]/10 px-3 py-1.5 rounded-full">⬇ CSV</button>
+      </div>
+      <div className="bg-white rounded-xl p-3 border border-[#EAE4D4] overflow-x-auto">{children}</div>
+    </div>
+  );
+}
+
+/* ---------- Admin ---------- */
+
+function AdminScreen({ db, persist, addLog, flash, onBack }) {
+  const [tab, setTab] = useState("Items");
+  const [newItemName, setNewItemName] = useState("");
+  const [newItemCat, setNewItemCat] = useState(db.categories[0]);
+  const [newItemUnit, setNewItemUnit] = useState("kg");
+  const [newSupplierName, setNewSupplierName] = useState("");
+  const [newSupplierItems, setNewSupplierItems] = useState([]);
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserPin, setNewUserPin] = useState("");
+  const [newUserPerms, setNewUserPerms] = useState(["purchase"]);
+  const [ratesSupplierId, setRatesSupplierId] = useState(db.suppliers[0]?.id || "");
+
+  const addItem = () => { if (!newItemName.trim()) return; const rec = { id: uid("i"), name: newItemName.trim(), category: newItemCat, unit: newItemUnit || "unit" }; const next = { ...db, items: [...db.items, rec] }; addLog(next, "Admin", `Added item ${rec.name}`); persist(next); setNewItemName(""); flash("Item added"); };
+  const delItem = (id) => persist({ ...db, items: db.items.filter(i => i.id !== id) });
+  const addSupplier = () => { if (!newSupplierName.trim()) return; const rec = { id: uid("s"), name: newSupplierName.trim(), itemIds: newSupplierItems }; const next = { ...db, suppliers: [...db.suppliers, rec] }; addLog(next, "Admin", `Added supplier ${rec.name}`); persist(next); setNewSupplierName(""); setNewSupplierItems([]); flash("Supplier added"); };
+  const delSupplier = (id) => persist({ ...db, suppliers: db.suppliers.filter(s => s.id !== id) });
+  const toggleSupplierItem = (id) => setNewSupplierItems(v => v.includes(id) ? v.filter(x => x !== id) : [...v, id]);
+  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); flash("User added"); };
+  const delUser = (id) => persist({ ...db, users: db.users.filter(u => u.id !== id) });
+  const toggleUserPerm = (userId, perm) => {
+    const next = { ...db, users: db.users.map(u => {
+      if (u.id !== userId) return u;
+      const has = (u.permissions || []).includes(perm);
+      return { ...u, permissions: has ? u.permissions.filter(p => p !== perm) : [...(u.permissions || []), perm] };
+    }) };
+    persist(next);
+  };
+
+  const ratesSupplier = db.suppliers.find(s => s.id === ratesSupplierId);
+  const setPricing = (itemId, patch) => {
+    const cur = (db.pricing && db.pricing[ratesSupplierId] && db.pricing[ratesSupplierId][itemId]) || { mode: "manual" };
+    const next = { ...db, pricing: { ...db.pricing, [ratesSupplierId]: { ...(db.pricing[ratesSupplierId] || {}), [itemId]: { ...cur, ...patch } } } };
+    persist(next);
+  };
+
+  return (
+    <div>
+      <TopBar title="Admin" onBack={onBack} />
+      <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
+        {["Items", "Suppliers", "Rates", "Users"].map(t => (
+          <button key={t} onClick={() => setTab(t)} className={`flex-1 whitespace-nowrap py-2.5 px-3 rounded-xl text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
+        ))}
+      </div>
+      <div className="p-4">
+        {tab === "Items" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <input className={numCls + " font-sans"} placeholder="Item name" value={newItemName} onChange={e => setNewItemName(e.target.value)} />
+                <select className={selCls} value={newItemCat} onChange={e => setNewItemCat(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select>
+              </div>
+              <div className="flex gap-2">
+                <input className={numCls + " font-sans"} placeholder="Unit (kg, ltr...)" value={newItemUnit} onChange={e => setNewItemUnit(e.target.value)} />
+                <button onClick={addItem} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold">+ Add</button>
+              </div>
+            </div>
+            {db.items.map(i => (
+              <div key={i.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                <span className="text-sm"><b>{i.name}</b> <span className="text-[#8A9690]">· {i.category} · {i.unit}</span></span>
+                <button onClick={() => delItem(i.id)} className="text-[#B33A3A]">✕</button>
+              </div>
+            ))}
+          </React.Fragment>
+        )}
+        {tab === "Suppliers" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <input className={numCls + " font-sans mb-2"} placeholder="Supplier name" value={newSupplierName} onChange={e => setNewSupplierName(e.target.value)} />
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Linked items</div>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {db.items.map(i => (
+                  <button key={i.id} onClick={() => toggleSupplierItem(i.id)} className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${newSupplierItems.includes(i.id) ? "bg-[#2B6E63] text-white border-[#2B6E63]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>{i.name}</button>
+                ))}
+              </div>
+              <button onClick={addSupplier} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Supplier</button>
+            </div>
+            {db.suppliers.map(s => (
+              <div key={s.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                <span className="text-sm"><b>{s.name}</b> <span className="text-[#8A9690]">· {s.itemIds.length} item(s)</span></span>
+                <button onClick={() => delSupplier(s.id)} className="text-[#B33A3A]">✕</button>
+              </div>
+            ))}
+          </React.Fragment>
+        )}
+        {tab === "Rates" && (
+          <React.Fragment>
+            <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Supplier</div>
+            <select className={selCls + " mb-4"} value={ratesSupplierId} onChange={e => setRatesSupplierId(e.target.value)}>
+              {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            {ratesSupplier && ratesSupplier.itemIds.map(itemId => {
+              const item = db.items.find(i => i.id === itemId);
+              if (!item) return null;
+              const cfg = (db.pricing && db.pricing[ratesSupplierId] && db.pricing[ratesSupplierId][itemId]) || { mode: "manual" };
+              return (
+                <div key={itemId} className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-3">
+                  <div className="font-semibold text-[#1F2A24] mb-2">{item.name}</div>
+                  <div className="grid grid-cols-3 gap-1.5 mb-2">
+                    {["manual", "fixed", "formula"].map(m => (
+                      <button key={m} onClick={() => setPricing(itemId, { mode: m })} className={`py-2 rounded-lg text-xs font-semibold capitalize border-2 ${cfg.mode === m ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>{m}</button>
+                    ))}
+                  </div>
+                  {cfg.mode === "fixed" && (
+                    <input className={numCls} type="number" placeholder="Fixed rate" defaultValue={cfg.rate || ""} onBlur={e => setPricing(itemId, { rate: Number(e.target.value) || 0 })} />
+                  )}
+                  {cfg.mode === "formula" && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <input className={numCls} type="number" placeholder="Offset (+)" defaultValue={cfg.offset || ""} onBlur={e => setPricing(itemId, { offset: Number(e.target.value) || 0 })} />
+                      <input className={numCls} type="number" placeholder="Multiplier (×)" defaultValue={cfg.multiplier || ""} onBlur={e => setPricing(itemId, { multiplier: Number(e.target.value) || 1 })} />
+                    </div>
+                  )}
+                  {cfg.mode !== "manual" && (
+                    <label className="flex items-center gap-2 mt-2.5 text-sm font-medium">
+                      <input type="checkbox" checked={!!cfg.cashOnly} onChange={e => setPricing(itemId, { cashOnly: e.target.checked })} /> Cash only (no credit)
+                    </label>
+                  )}
+                </div>
+              );
+            })}
+            {ratesSupplier && ratesSupplier.itemIds.length === 0 && <div className="text-sm text-[#8A9690]">This supplier has no linked items yet — add them in the Suppliers tab.</div>}
+          </React.Fragment>
+        )}
+        {tab === "Users" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <input className={numCls + " font-sans"} placeholder="Name" value={newUserName} onChange={e => setNewUserName(e.target.value)} />
+                <input className={numCls} placeholder="PIN" value={newUserPin} onChange={e => setNewUserPin(e.target.value.replace(/\D/g, "").slice(0, 6))} />
+              </div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Allowed screens</div>
+              <div className="mb-3"><PermChips selected={newUserPerms} onToggle={(p) => setNewUserPerms(v => v.includes(p) ? v.filter(x => x !== p) : [...v, p])} /></div>
+              <button onClick={addUser} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add User</button>
+            </div>
+            {db.users.map(u => (
+              <div key={u.id} className="bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                <div className="flex justify-between items-center mb-1.5">
+                  <span className="text-sm"><b>{u.name}</b> <span className="text-[#8A9690]">· PIN {u.pin}</span></span>
+                  <button onClick={() => delUser(u.id)} className="text-[#B33A3A]">✕</button>
+                </div>
+                <PermChips selected={u.permissions || []} onToggle={(p) => toggleUserPerm(u.id, p)} />
+              </div>
+            ))}
+          </React.Fragment>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}); });
+}
+</script>
+</body>
+</html>

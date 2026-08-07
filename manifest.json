@@ -1,0 +1,11 @@
+{
+  "name": "StockFlow",
+  "short_name": "StockFlow",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1F2A24",
+  "theme_color": "#1F2A24",
+  "icons": [
+    { "src": "https://api.iconify.design/mdi/warehouse.svg?color=%23C98A2C", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
