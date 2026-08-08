@@ -24,7 +24,14 @@ const { useState, useEffect, useMemo, useCallback } = React;
 const BRANCHES = ["Store", "FB", "North"];
 const ALL_PERMISSIONS = ["purchase", "issue", "ending", "demand", "payment", "reports", "admin"];
 const uid = (p) => p + Math.random().toString(36).slice(2, 9);
-const todayStr = () => new Date().toISOString().slice(0, 10);
+// Business day runs 9:00 AM to 6:00 AM the next calendar day.
+// Anything before 9 AM still counts as "yesterday's" business date.
+const pad2 = (n) => String(n).padStart(2, "0");
+const todayStr = () => {
+  const d = new Date();
+  if (d.getHours() < 9) d.setDate(d.getDate() - 1);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+};
 const nowStr = () => new Date().toLocaleString();
 const money = (n) => "Rs " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 
@@ -116,6 +123,19 @@ function PermChips({ selected, onToggle }) {
         <button key={p} type="button" onClick={() => onToggle(p)}
           className={`px-2.5 py-1 rounded-full text-xs font-semibold border capitalize ${selected.includes(p) ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>
           {p}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function BranchChips({ selected, onToggle }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {BRANCHES.map(b => (
+        <button key={b} type="button" onClick={() => onToggle(b)}
+          className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${selected.includes(b) ? "bg-[#2B6E63] text-white border-[#2B6E63]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>
+          {b}
         </button>
       ))}
     </div>
@@ -418,8 +438,9 @@ function ItemQtyGrid({ items, values, setValues, stockCheck }) {
 /* ---------- Issue ---------- */
 
 function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
-  const [from, setFrom] = useState("Store");
-  const [to, setTo] = useState("FB");
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const [from, setFrom] = useState(myBranches[0]);
+  const [to, setTo] = useState(BRANCHES.find(b => b !== myBranches[0]) || BRANCHES[1]);
   const [category, setCategory] = useState(db.categories[0]);
   const [values, setValues] = useState({});
   const items = db.items.filter(i => i.category === category);
@@ -442,7 +463,7 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
       <TopBar title="Issue" onBack={onDone} />
       <div className="p-5">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Issue From"><select className={selCls} value={from} onChange={e => setFrom(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select></Field>
+          <Field label="Issue From"><select className={selCls} value={from} onChange={e => setFrom(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
           <Field label="Issue To"><select className={selCls} value={to} onChange={e => setTo(e.target.value)}>{BRANCHES.filter(b => b !== from).map(b => <option key={b}>{b}</option>)}</select></Field>
         </div>
         <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
@@ -457,7 +478,8 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
 /* ---------- Ending ---------- */
 
 function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
-  const [branch, setBranch] = useState("Store");
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const [branch, setBranch] = useState(myBranches[0]);
   const [category, setCategory] = useState(db.categories[0]);
   const [values, setValues] = useState({});
   const items = db.items.filter(i => i.category === category);
@@ -476,7 +498,7 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
     <div>
       <TopBar title="Ending" onBack={onDone} />
       <div className="p-5">
-        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select></Field>
+        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
         <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Closing Count</div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
@@ -489,7 +511,8 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
 /* ---------- Demand ---------- */
 
 function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
-  const [branch, setBranch] = useState("FB");
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const [branch, setBranch] = useState(myBranches[0]);
   const [category, setCategory] = useState(db.categories[0]);
   const [values, setValues] = useState({});
   const items = db.items.filter(i => i.category === category);
@@ -508,7 +531,7 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
     <div>
       <TopBar title="Demand" onBack={onDone} />
       <div className="p-5">
-        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select></Field>
+        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
         <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Quantity Required</div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
@@ -684,6 +707,7 @@ function ReportTable({ title, onExport, children }) {
 
 function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [tab, setTab] = useState("Items");
+  const [itemQ, setItemQ] = useState("");
   const [newItemName, setNewItemName] = useState("");
   const [newItemCat, setNewItemCat] = useState(db.categories[0]);
   const [newItemUnit, setNewItemUnit] = useState("kg");
@@ -692,20 +716,48 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newUserName, setNewUserName] = useState("");
   const [newUserPin, setNewUserPin] = useState("");
   const [newUserPerms, setNewUserPerms] = useState(["purchase"]);
+  const [newUserBranches, setNewUserBranches] = useState([...BRANCHES]);
   const [ratesSupplierId, setRatesSupplierId] = useState(db.suppliers[0]?.id || "");
+  const [editItemId, setEditItemId] = useState(null);
+  const [editItemDraft, setEditItemDraft] = useState({});
+  const [editSupplierId, setEditSupplierId] = useState(null);
+  const [editSupplierDraft, setEditSupplierDraft] = useState({});
 
   const addItem = () => { if (!newItemName.trim()) return; const rec = { id: uid("i"), name: newItemName.trim(), category: newItemCat, unit: newItemUnit || "unit" }; const next = { ...db, items: [...db.items, rec] }; addLog(next, "Admin", `Added item ${rec.name}`); persist(next); setNewItemName(""); flash("Item added"); };
   const delItem = (id) => persist({ ...db, items: db.items.filter(i => i.id !== id) });
+  const startEditItem = (i) => { setEditItemId(i.id); setEditItemDraft({ name: i.name, category: i.category, unit: i.unit }); };
+  const saveEditItem = () => {
+    const next = { ...db, items: db.items.map(i => i.id === editItemId ? { ...i, ...editItemDraft } : i) };
+    addLog(next, "Admin", `Edited item ${editItemDraft.name}`);
+    persist(next); setEditItemId(null); flash("Item updated");
+  };
+
   const addSupplier = () => { if (!newSupplierName.trim()) return; const rec = { id: uid("s"), name: newSupplierName.trim(), itemIds: newSupplierItems }; const next = { ...db, suppliers: [...db.suppliers, rec] }; addLog(next, "Admin", `Added supplier ${rec.name}`); persist(next); setNewSupplierName(""); setNewSupplierItems([]); flash("Supplier added"); };
   const delSupplier = (id) => persist({ ...db, suppliers: db.suppliers.filter(s => s.id !== id) });
   const toggleSupplierItem = (id) => setNewSupplierItems(v => v.includes(id) ? v.filter(x => x !== id) : [...v, id]);
-  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); flash("User added"); };
+  const startEditSupplier = (s) => { setEditSupplierId(s.id); setEditSupplierDraft({ name: s.name, itemIds: [...s.itemIds] }); };
+  const toggleEditSupplierItem = (id) => setEditSupplierDraft(d => ({ ...d, itemIds: d.itemIds.includes(id) ? d.itemIds.filter(x => x !== id) : [...d.itemIds, id] }));
+  const saveEditSupplier = () => {
+    const next = { ...db, suppliers: db.suppliers.map(s => s.id === editSupplierId ? { ...s, ...editSupplierDraft } : s) };
+    addLog(next, "Admin", `Edited supplier ${editSupplierDraft.name}`);
+    persist(next); setEditSupplierId(null); flash("Supplier updated");
+  };
+
+  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); flash("User added"); };
   const delUser = (id) => persist({ ...db, users: db.users.filter(u => u.id !== id) });
   const toggleUserPerm = (userId, perm) => {
     const next = { ...db, users: db.users.map(u => {
       if (u.id !== userId) return u;
       const has = (u.permissions || []).includes(perm);
       return { ...u, permissions: has ? u.permissions.filter(p => p !== perm) : [...(u.permissions || []), perm] };
+    }) };
+    persist(next);
+  };
+  const toggleUserBranch = (userId, branch) => {
+    const next = { ...db, users: db.users.map(u => {
+      if (u.id !== userId) return u;
+      const has = (u.branches || []).includes(branch);
+      return { ...u, branches: has ? u.branches.filter(b => b !== branch) : [...(u.branches || []), branch] };
     }) };
     persist(next);
   };
@@ -738,11 +790,29 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 <button onClick={addItem} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold">+ Add</button>
               </div>
             </div>
-            {db.items.map(i => (
-              <div key={i.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
-                <span className="text-sm"><b>{i.name}</b> <span className="text-[#8A9690]">· {i.category} · {i.unit}</span></span>
-                <button onClick={() => delItem(i.id)} className="text-[#B33A3A]">✕</button>
-              </div>
+            <input className={numCls + " font-sans mb-3"} placeholder={`Search ${db.items.length} items…`} value={itemQ} onChange={e => setItemQ(e.target.value)} />
+            {db.items.filter(i => i.name.toLowerCase().includes(itemQ.toLowerCase())).map(i => (
+              editItemId === i.id ? (
+                <div key={i.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <input className={numCls + " font-sans"} value={editItemDraft.name} onChange={e => setEditItemDraft(d => ({ ...d, name: e.target.value }))} />
+                    <select className={selCls} value={editItemDraft.category} onChange={e => setEditItemDraft(d => ({ ...d, category: e.target.value }))}>{db.categories.map(c => <option key={c}>{c}</option>)}</select>
+                  </div>
+                  <div className="flex gap-2">
+                    <input className={numCls + " font-sans"} value={editItemDraft.unit} onChange={e => setEditItemDraft(d => ({ ...d, unit: e.target.value }))} />
+                    <button onClick={saveEditItem} className="bg-[#2B6E63] text-white px-4 rounded-xl font-semibold">Save</button>
+                    <button onClick={() => setEditItemId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 rounded-xl font-semibold">Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div key={i.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                  <span className="text-sm"><b>{i.name}</b> <span className="text-[#8A9690]">· {i.category} · {i.unit}</span></span>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => startEditItem(i)} className="text-[#5C6B62]">✎</button>
+                    <button onClick={() => delItem(i.id)} className="text-[#B33A3A]">✕</button>
+                  </div>
+                </div>
+              )
             ))}
           </React.Fragment>
         )}
@@ -759,10 +829,29 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               <button onClick={addSupplier} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Supplier</button>
             </div>
             {db.suppliers.map(s => (
-              <div key={s.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
-                <span className="text-sm"><b>{s.name}</b> <span className="text-[#8A9690]">· {s.itemIds.length} item(s)</span></span>
-                <button onClick={() => delSupplier(s.id)} className="text-[#B33A3A]">✕</button>
-              </div>
+              editSupplierId === s.id ? (
+                <div key={s.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
+                  <input className={numCls + " font-sans mb-2"} value={editSupplierDraft.name} onChange={e => setEditSupplierDraft(d => ({ ...d, name: e.target.value }))} />
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Linked items</div>
+                  <div className="flex flex-wrap gap-1.5 mb-2 max-h-40 overflow-y-auto">
+                    {db.items.map(i => (
+                      <button key={i.id} onClick={() => toggleEditSupplierItem(i.id)} className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${editSupplierDraft.itemIds.includes(i.id) ? "bg-[#2B6E63] text-white border-[#2B6E63]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>{i.name}</button>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={saveEditSupplier} className="bg-[#2B6E63] text-white px-4 py-2 rounded-xl font-semibold">Save</button>
+                    <button onClick={() => setEditSupplierId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 py-2 rounded-xl font-semibold">Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div key={s.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                  <span className="text-sm"><b>{s.name}</b> <span className="text-[#8A9690]">· {s.itemIds.length} item(s)</span></span>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => startEditSupplier(s)} className="text-[#5C6B62]">✎</button>
+                    <button onClick={() => delSupplier(s.id)} className="text-[#B33A3A]">✕</button>
+                  </div>
+                </div>
+              )
             ))}
           </React.Fragment>
         )}
@@ -813,6 +902,8 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               </div>
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Allowed screens</div>
               <div className="mb-3"><PermChips selected={newUserPerms} onToggle={(p) => setNewUserPerms(v => v.includes(p) ? v.filter(x => x !== p) : [...v, p])} /></div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Branches</div>
+              <div className="mb-3"><BranchChips selected={newUserBranches} onToggle={(b) => setNewUserBranches(v => v.includes(b) ? v.filter(x => x !== b) : [...v, b])} /></div>
               <button onClick={addUser} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add User</button>
             </div>
             {db.users.map(u => (
@@ -821,7 +912,10 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                   <span className="text-sm"><b>{u.name}</b> <span className="text-[#8A9690]">· PIN {u.pin}</span></span>
                   <button onClick={() => delUser(u.id)} className="text-[#B33A3A]">✕</button>
                 </div>
+                <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mb-1">Screens</div>
                 <PermChips selected={u.permissions || []} onToggle={(p) => toggleUserPerm(u.id, p)} />
+                <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Branches</div>
+                <BranchChips selected={u.branches || []} onToggle={(b) => toggleUserBranch(u.id, b)} />
               </div>
             ))}
           </React.Fragment>
@@ -832,17 +926,18 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
-   </script>
+</script>
 
-   <script>
-   (function () {
+<script>
+(function () {
   var code = document.getElementById("app-source").textContent;
-  var compiled = Babel.transform(code, { presets: [["react", { runtime: "classic" }]], sourceType: "script" }).code;
+  var compiled = Babel.transform(code, { presets: ["react"], sourceType: "script" }).code;
   var script = document.createElement("script");
   script.textContent = compiled;
   document.body.appendChild(script);
 })();
-    if ('serviceWorker' in navigator) {  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}); });
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}); });
 }
 </script>
 </body>
