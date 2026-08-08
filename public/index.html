@@ -837,7 +837,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(
    <script>
    (function () {
   var code = document.getElementById("app-source").textContent;
-  var compiled = Babel.transform(code, { presets: ["react"], sourceType: "script" }).code;
+  var compiled = Babel.transform(code, { presets: [["react", { runtime: "classic" }]], sourceType: "script" }).code;
   var script = document.createElement("script");
   script.textContent = compiled;
   document.body.appendChild(script);
