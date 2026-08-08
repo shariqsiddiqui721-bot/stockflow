@@ -125,5 +125,3 @@ init()
     console.error("Startup failed:", e);
     process.exit(1);
   });
-
-       
