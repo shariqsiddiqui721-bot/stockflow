@@ -6,7 +6,7 @@
 <title>StockFlow</title>
 <link rel="manifest" href="/manifest.json" />
 <meta name="theme-color" content="#1F2A24" />
-<script type="module" src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -838,7 +838,9 @@ ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(
    (function () {
   var code = document.getElementById("app-source").textContent;
   var compiled = Babel.transform(code, { presets: ["react"], sourceType: "script" }).code;
-  (0, eval)(compiled);
+  var script = document.createElement("script");
+  script.textContent = compiled;
+  document.body.appendChild(script);
 })();
     if ('serviceWorker' in navigator) {  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}); });
 }
