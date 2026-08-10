@@ -736,8 +736,6 @@ function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
           </ReportTable>
         )}
         {tab === "Activity Log" && (
-        {tab === "Activity Log" && (
-        {tab === "Activity Log" && (
           <ReportTable title="User Activity" onExport={() => downloadCSV("activity-log.csv", toCSV(db.log, [{ label: "Time", get: l => l.at }, { label: "User", get: l => l.user }, { label: "Action", get: l => l.action }, { label: "Detail", get: l => l.detail }]))}>
             {db.log.slice(0, 200).map(l => (
               <div key={l.id} className="bg-white rounded-xl p-3 mb-2 border border-[#EAE4D4]">
