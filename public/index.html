@@ -600,7 +600,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Purchases", "Supplier Ledger", "Demand vs Issue", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Purchases", "Supplier Ledger", "Demand vs Issue", "By Category", "Activity Log"];
 
 function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
   const [tab, setTab] = useState(REPORT_TABS[0]);
@@ -677,6 +677,38 @@ function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
             </table>
           </ReportTable>
         )}
+  {tab === "By Category" && (
+          <ReportTable
+            title="Demand / Issued / Ending by Category"
+            onExport={() => downloadCSV("by-category.csv", toCSV(db.categories, [
+              { label: "Category", get: c => c },
+              { label: "Demanded", get: c => db.demands.filter(d => db.items.find(i => i.id === d.itemId)?.category === c).reduce((a, d) => a + d.qty, 0) },
+              { label: "Issued", get: c => db.issues.filter(x => db.items.find(i => i.id === x.itemId)?.category === c).reduce((a, x) => a + x.qty, 0) },
+              { label: "Ending", get: c => db.endings.filter(x => db.items.find(i => i.id === x.itemId)?.category === c).reduce((a, x) => a + x.qty, 0) },
+            ]))}
+          >
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Category</th><th className="text-right py-1.5">Demanded</th><th className="text-right py-1.5">Issued</th><th className="text-right py-1.5">Ending</th></tr></thead>
+              <tbody>
+                {db.categories.map(c => {
+                  const dem = db.demands.filter(d => db.items.find(i => i.id === d.itemId)?.category === c).reduce((a, d) => a + d.qty, 0);
+                  const iss = db.issues.filter(x => db.items.find(i => i.id === x.itemId)?.category === c).reduce((a, x) => a + x.qty, 0);
+                  const end = db.endings.filter(x => db.items.find(i => i.id === x.itemId)?.category === c).reduce((a, x) => a + x.qty, 0);
+                  if (dem === 0 && iss === 0 && end === 0) return null;
+                  return (
+                    <tr key={c} className="border-t border-[#EFEBDF]">
+                      <td className="py-2 font-medium">{c}</td>
+                      <td className="text-right py-2 font-mono">{dem}</td>
+                      <td className={`text-right py-2 font-mono ${iss < dem ? "text-[#B33A3A] font-bold" : ""}`}>{iss}</td>
+                      <td className="text-right py-2 font-mono">{end}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </ReportTable>
+        )}
+        {tab === "Activity Log" && (
         {tab === "Activity Log" && (
           <ReportTable title="User Activity" onExport={() => downloadCSV("activity-log.csv", toCSV(db.log, [{ label: "Time", get: l => l.at }, { label: "User", get: l => l.user }, { label: "Action", get: l => l.action }, { label: "Detail", get: l => l.detail }]))}>
             {db.log.slice(0, 200).map(l => (
