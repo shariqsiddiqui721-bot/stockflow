@@ -308,89 +308,138 @@ function MainMenu({ session, onLogout, setScreen }) {
 /* ---------- Purchase ---------- */
 
 function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
-  const [category, setCategory] = useState(db.categories[0]);
-  const [itemId, setItemId] = useState("");
-  const [supplierId, setSupplierId] = useState("");
-  const [qty, setQty] = useState("");
-  const [rate, setRate] = useState("");
+  const [supplierId, setSupplierId] = useState(db.suppliers[0]?.id || "");
+  const [category, setCategory] = useState("");
+  const [rows, setRows] = useState({}); // itemId -> { qty, rate }
   const [payMode, setPayMode] = useState("credit");
-  const [todayInput, setTodayInput] = useState("");
+  const [todayInputs, setTodayInputs] = useState({}); // category -> value
 
-  const items = db.items.filter(i => i.category === category);
-  useEffect(() => { setItemId(items[0]?.id || ""); }, [category]);
-  const suppliers = db.suppliers.filter(s => s.itemIds.includes(itemId));
-  useEffect(() => { setSupplierId(suppliers[0]?.id || ""); }, [itemId]);
+  const supplier = db.suppliers.find(s => s.id === supplierId);
+  const supplierItems = supplier ? db.items.filter(i => supplier.itemIds.includes(i.id)) : [];
+  const supplierCats = [...new Set(supplierItems.map(i => i.category))];
+  const visibleItems = category ? supplierItems.filter(i => i.category === category) : supplierItems;
 
-  const pricing = supplierId && itemId ? computeRate(db, supplierId, itemId) : null;
-  const item = db.items.find(i => i.id === itemId);
+  useEffect(() => { setRows({}); setCategory(""); }, [supplierId]);
+
+  // pricing per item, recomputed whenever today's rates change
+  const pricingByItem = useMemo(() => {
+    const map = {};
+    visibleItems.forEach(i => { map[i.id] = supplierId ? computeRate(db, supplierId, i.id) : null; });
+    return map;
+  }, [supplierId, visibleItems.map(i => i.id).join(","), db.todayRates]);
 
   useEffect(() => {
-    if (pricing && pricing.rate !== undefined) { setRate(String(pricing.rate)); }
-    if (pricing && pricing.cashOnly) setPayMode("cash");
-    if (!pricing) setRate("");
-  }, [supplierId, itemId, db.todayRates]);
+    setRows(prev => {
+      const next = { ...prev };
+      visibleItems.forEach(i => {
+        const p = pricingByItem[i.id];
+        if (p && p.rate !== undefined && (next[i.id]?.rate === undefined || next[i.id]?.rate === "")) {
+          next[i.id] = { ...next[i.id], rate: String(p.rate) };
+        }
+      });
+      return next;
+    });
+  }, [pricingByItem]);
 
-  const amount = (Number(qty) || 0) * (Number(rate) || 0);
+  const anyCashOnly = visibleItems.some(i => rows[i.id]?.qty && pricingByItem[i.id]?.cashOnly);
+  useEffect(() => { if (anyCashOnly) setPayMode("cash"); }, [anyCashOnly]);
 
-  const saveTodayRate = () => {
-    if (!todayInput || Number(todayInput) <= 0) { flash("Enter a valid rate", "error"); return; }
-    const next = { ...db, todayRates: { ...db.todayRates, [pricing.category]: { date: todayStr(), rate: Number(todayInput) } } };
-    addLog(next, "Today's Rate", `${pricing.category} rate set to ${todayInput}`);
+  const categoriesNeedingToday = [...new Set(
+    visibleItems.filter(i => rows[i.id]?.qty && pricingByItem[i.id]?.needsToday).map(i => pricingByItem[i.id].category)
+  )];
+
+  const setRow = (itemId, field, value) => setRows(v => ({ ...v, [itemId]: { ...v[itemId], [field]: value } }));
+
+  const saveTodayRate = (cat) => {
+    const val = todayInputs[cat];
+    if (!val || Number(val) <= 0) { flash("Enter a valid rate", "error"); return; }
+    const next = { ...db, todayRates: { ...db.todayRates, [cat]: { date: todayStr(), rate: Number(val) } } };
+    addLog(next, "Today's Rate", `${cat} rate set to ${val}`);
     persist(next);
-    setTodayInput("");
+    setTodayInputs(v => ({ ...v, [cat]: "" }));
     flash("Today's rate saved");
   };
 
+  const entries = Object.entries(rows).filter(([id, r]) => Number(r?.qty) > 0 && Number(r?.rate) > 0);
+  const total = entries.reduce((a, [, r]) => a + Number(r.qty) * Number(r.rate), 0);
+
   const save = () => {
-    if (!itemId || !supplierId || !qty || !rate) { flash("Fill all fields", "error"); return; }
-    const rec = { id: uid("p"), date: todayStr(), itemId, supplierId, qty: Number(qty), rate: Number(rate), amount, paymentMode: payMode, userId: session.id };
-    const next = { ...db, purchases: [rec, ...db.purchases] };
-    addLog(next, "Purchase", `${item.name} x${qty} @ ${rate} (${payMode}) from ${db.suppliers.find(s=>s.id===supplierId)?.name}`);
-    persist(next); flash("Purchase saved"); setQty("");
+    if (entries.length === 0) { flash("Enter quantity and rate for at least one item", "error"); return; }
+    if (categoriesNeedingToday.length > 0) { flash("Set today's rate for: " + categoriesNeedingToday.join(", "), "error"); return; }
+    const recs = entries.map(([itemId, r]) => {
+      const qty = Number(r.qty), rate = Number(r.rate);
+      return { id: uid("p"), date: todayStr(), itemId, supplierId, qty, rate, amount: qty * rate, paymentMode: payMode, userId: session.id };
+    });
+    const next = { ...db, purchases: [...recs, ...db.purchases] };
+    addLog(next, "Purchase", `${supplier.name}: ${recs.length} item(s), bill ${money(total)} (${payMode})`);
+    persist(next);
+    flash("Bill saved — " + recs.length + " item(s)");
+    setRows({});
   };
 
   return (
     <div>
       <TopBar title="Purchase" onBack={onDone} />
       <div className="p-5">
-        <Field label="Item Category">
-          <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select>
-        </Field>
-        <Field label="Item">
-          <select className={selCls} value={itemId} onChange={e => setItemId(e.target.value)}>{items.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}</select>
-        </Field>
         <Field label="Supplier">
           <select className={selCls} value={supplierId} onChange={e => setSupplierId(e.target.value)}>
-            {suppliers.length === 0 && <option value="">No supplier linked</option>}
-            {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </Field>
 
-        {pricing && pricing.needsToday && (
-          <div className="bg-[#FBF0DD] border-2 border-[#C98A2C] rounded-xl p-3.5 mb-4">
-            <div className="text-sm font-semibold text-[#7A5C2E] mb-2">Set today's {pricing.category} rate first</div>
-            <div className="flex gap-2">
-              <input className={numCls} type="number" inputMode="decimal" placeholder="e.g. 450" value={todayInput} onChange={e => setTodayInput(e.target.value)} />
-              <button onClick={saveTodayRate} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Set</button>
-            </div>
-          </div>
+        {supplierCats.length > 1 && (
+          <Field label="Filter by Category (optional)">
+            <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>
+              <option value="">All ({supplierItems.length} items)</option>
+              {supplierCats.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
         )}
 
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={`Quantity (${item?.unit || ""})`}><input className={numCls} type="number" inputMode="decimal" value={qty} onChange={e => setQty(e.target.value)} placeholder="0" /></Field>
-          <Field label={pricing && pricing.mode === "fixed" ? "Rate (fixed)" : pricing && pricing.mode === "formula" ? `Rate (formula, today ${pricing.todayRate ?? "-"})` : "Rate"}>
-            <input className={numCls} type="number" inputMode="decimal" value={rate}
-              onChange={e => setRate(e.target.value)}
-              readOnly={!!(pricing && (pricing.mode === "fixed" || (pricing.mode === "formula" && !pricing.needsToday)))}
-              placeholder="0" />
-          </Field>
+        {categoriesNeedingToday.map(cat => (
+          <div key={cat} className="bg-[#FBF0DD] border-2 border-[#C98A2C] rounded-xl p-3.5 mb-4">
+            <div className="text-sm font-semibold text-[#7A5C2E] mb-2">Set today's {cat} rate first</div>
+            <div className="flex gap-2">
+              <input className={numCls} type="number" inputMode="decimal" placeholder="e.g. 450"
+                value={todayInputs[cat] || ""} onChange={e => setTodayInputs(v => ({ ...v, [cat]: e.target.value }))} />
+              <button onClick={() => saveTodayRate(cat)} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Set</button>
+            </div>
+          </div>
+        ))}
+
+        <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">
+          {supplier ? `${supplier.name} — Items & Rates` : "Select a supplier"}
+        </div>
+        <div className="space-y-2.5 mb-5">
+          {visibleItems.map(it => {
+            const p = pricingByItem[it.id];
+            const locked = !!(p && (p.mode === "fixed" || (p.mode === "formula" && !p.needsToday)));
+            const r = rows[it.id] || {};
+            const amt = (Number(r.qty) || 0) * (Number(r.rate) || 0);
+            return (
+              <div key={it.id} className="bg-white rounded-xl p-3 border-2 border-[#EAE4D4]">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="font-semibold text-[#1F2A24]">{it.name}</div>
+                  <div className="text-[11px] text-[#8A9690]">{it.unit}{p?.cashOnly ? " · cash only" : ""}</div>
+                </div>
+                <div className="grid grid-cols-3 gap-2 items-center">
+                  <input className="bg-[#F7F5F0] border-2 border-[#D8D2C2] rounded-lg px-2 py-2 text-right font-mono font-semibold text-[15px] focus:outline-none focus:border-[#C98A2C]"
+                    type="number" inputMode="decimal" placeholder="Qty" value={r.qty || ""} onChange={e => setRow(it.id, "qty", e.target.value)} />
+                  <input className="bg-[#F7F5F0] border-2 border-[#D8D2C2] rounded-lg px-2 py-2 text-right font-mono font-semibold text-[15px] focus:outline-none focus:border-[#C98A2C] disabled:opacity-70"
+                    type="number" inputMode="decimal" placeholder="Rate" value={r.rate || ""} onChange={e => setRow(it.id, "rate", e.target.value)}
+                    disabled={locked} />
+                  <div className="text-right font-mono font-bold text-[#1F2A24]">{amt > 0 ? money(amt) : "–"}</div>
+                </div>
+              </div>
+            );
+          })}
+          {supplier && visibleItems.length === 0 && <div className="text-sm text-[#8A9690]">No items linked to this supplier yet — add them in Admin.</div>}
         </div>
 
         <Field label="Payment">
           <div className="grid grid-cols-2 gap-2">
-            <button type="button" disabled={pricing && pricing.cashOnly === false ? false : false}
-              onClick={() => !(pricing && pricing.cashOnly) && setPayMode("credit")}
-              className={`py-3 rounded-xl font-semibold border-2 ${payMode === "credit" ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"} ${pricing && pricing.cashOnly ? "opacity-40 pointer-events-none" : ""}`}>
+            <button type="button" onClick={() => !anyCashOnly && setPayMode("credit")}
+              className={`py-3 rounded-xl font-semibold border-2 ${payMode === "credit" ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"} ${anyCashOnly ? "opacity-40 pointer-events-none" : ""}`}>
               Credit (Udhaar)
             </button>
             <button type="button" onClick={() => setPayMode("cash")}
@@ -398,19 +447,18 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
               Cash
             </button>
           </div>
-          {pricing && pricing.cashOnly && <div className="text-xs text-[#B3562C] font-semibold mt-1.5">This supplier/item is cash-only</div>}
+          {anyCashOnly && <div className="text-xs text-[#B3562C] font-semibold mt-1.5">One or more selected items are cash-only</div>}
         </Field>
 
         <div className="bg-[#2C3931] text-[#F4EFE4] rounded-xl p-4 mb-5 flex items-center justify-between">
-          <span className="text-sm font-semibold text-[#C98A2C] uppercase tracking-wide">Amount</span>
-          <span className="text-xl font-mono font-bold">{money(amount)}</span>
+          <span className="text-sm font-semibold text-[#C98A2C] uppercase tracking-wide">Bill Total</span>
+          <span className="text-xl font-mono font-bold">{money(total)}</span>
         </div>
-        <button className={btnPrimary} onClick={save} disabled={pricing && pricing.needsToday}>Save Purchase</button>
+        <button className={btnPrimary} onClick={save} disabled={entries.length === 0}>Save Bill</button>
       </div>
     </div>
   );
 }
-
 /* ---------- Shared grid ---------- */
 
 function ItemQtyGrid({ items, values, setValues, stockCheck }) {
@@ -602,12 +650,28 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 const REPORT_TABS = ["Stock Balance", "Purchases", "Supplier Ledger", "Demand vs Issue", "By Category", "Ending", "Activity Log"];
 
-function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
+function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack }) {
   const [tab, setTab] = useState(REPORT_TABS[0]);
   const [q, setQ] = useState("");
+  const [editPurchaseId, setEditPurchaseId] = useState(null);
+  const [editPurchaseDraft, setEditPurchaseDraft] = useState({});
   const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
   const supplierName = (id) => db.suppliers.find(s => s.id === id)?.name || id;
   const filteredItems = db.items.filter(i => i.name.toLowerCase().includes(q.toLowerCase()));
+
+  const startEditPurchase = (p) => { setEditPurchaseId(p.id); setEditPurchaseDraft({ qty: String(p.qty), rate: String(p.rate), paymentMode: p.paymentMode || "credit" }); };
+  const saveEditPurchase = () => {
+    const qty = Number(editPurchaseDraft.qty) || 0, rate = Number(editPurchaseDraft.rate) || 0;
+    if (qty <= 0 || rate <= 0) { flash("Enter valid qty and rate", "error"); return; }
+    const next = { ...db, purchases: db.purchases.map(p => p.id === editPurchaseId ? { ...p, qty, rate, amount: qty * rate, paymentMode: editPurchaseDraft.paymentMode } : p) };
+    addLog(next, "Admin", `Corrected purchase entry`);
+    persist(next); setEditPurchaseId(null); flash("Purchase updated");
+  };
+  const deletePurchase = (id) => {
+    const next = { ...db, purchases: db.purchases.filter(p => p.id !== id) };
+    addLog(next, "Admin", `Deleted a purchase entry`);
+    persist(next); flash("Purchase deleted");
+  };
 
   return (
     <div>
@@ -641,10 +705,32 @@ function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
         {tab === "Purchases" && (
           <ReportTable title="Purchase History" onExport={() => downloadCSV("purchases.csv", toCSV(db.purchases, [{ label: "Date", get: p => p.date }, { label: "Item", get: p => itemName(p.itemId) }, { label: "Supplier", get: p => supplierName(p.supplierId) }, { label: "Qty", get: p => p.qty }, { label: "Rate", get: p => p.rate }, { label: "Amount", get: p => p.amount }, { label: "Payment", get: p => p.paymentMode || "credit" }]))}>
             {db.purchases.filter(p => itemName(p.itemId).toLowerCase().includes(q.toLowerCase())).slice(0, 200).map(p => (
-              <div key={p.id} className="bg-white rounded-xl p-3 mb-2 border border-[#EAE4D4] flex justify-between items-center">
-                <div><div className="font-semibold">{itemName(p.itemId)}</div><div className="text-xs text-[#8A9690]">{supplierName(p.supplierId)} · {p.date} · {p.paymentMode === "cash" ? "Cash" : "Credit"}</div></div>
-                <div className="text-right"><div className="font-mono font-bold">{money(p.amount)}</div><div className="text-xs text-[#8A9690]">{p.qty} × {p.rate}</div></div>
-              </div>
+              editPurchaseId === p.id ? (
+                <div key={p.id} className="bg-white rounded-xl p-3 mb-2 border-2 border-[#C98A2C]">
+                  <div className="text-sm font-semibold mb-2">{itemName(p.itemId)} · {supplierName(p.supplierId)}</div>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <input className={numCls} type="number" placeholder="Qty" value={editPurchaseDraft.qty} onChange={e => setEditPurchaseDraft(d => ({ ...d, qty: e.target.value }))} />
+                    <input className={numCls} type="number" placeholder="Rate" value={editPurchaseDraft.rate} onChange={e => setEditPurchaseDraft(d => ({ ...d, rate: e.target.value }))} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <button onClick={() => setEditPurchaseDraft(d => ({ ...d, paymentMode: "credit" }))} className={`py-2 rounded-lg text-xs font-semibold border-2 ${editPurchaseDraft.paymentMode === "credit" ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>Credit</button>
+                    <button onClick={() => setEditPurchaseDraft(d => ({ ...d, paymentMode: "cash" }))} className={`py-2 rounded-lg text-xs font-semibold border-2 ${editPurchaseDraft.paymentMode === "cash" ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>Cash</button>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={saveEditPurchase} className="bg-[#2B6E63] text-white px-4 py-2 rounded-xl font-semibold text-sm">Save</button>
+                    <button onClick={() => setEditPurchaseId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 py-2 rounded-xl font-semibold text-sm">Cancel</button>
+                    <button onClick={() => deletePurchase(p.id)} className="ml-auto text-[#B33A3A] text-sm font-semibold">Delete</button>
+                  </div>
+                </div>
+              ) : (
+                <div key={p.id} className="bg-white rounded-xl p-3 mb-2 border border-[#EAE4D4] flex justify-between items-center">
+                  <div><div className="font-semibold">{itemName(p.itemId)}</div><div className="text-xs text-[#8A9690]">{supplierName(p.supplierId)} · {p.date} · {p.paymentMode === "cash" ? "Cash" : "Credit"}</div></div>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right"><div className="font-mono font-bold">{money(p.amount)}</div><div className="text-xs text-[#8A9690]">{p.qty} × {p.rate}</div></div>
+                    <button onClick={() => startEditPurchase(p)} className="text-[#5C6B62]">✎</button>
+                  </div>
+                </div>
+              )
             ))}
           </ReportTable>
         )}
@@ -677,7 +763,7 @@ function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
             </table>
           </ReportTable>
         )}
-  {tab === "By Category" && (
+        {tab === "By Category" && (
           <ReportTable
             title="Demand / Issued / Ending by Category"
             onExport={() => downloadCSV("by-category.csv", toCSV(db.categories, [
@@ -708,7 +794,7 @@ function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
             </table>
           </ReportTable>
         )}
-  {tab === "Ending" && (
+        {tab === "Ending" && (
           <ReportTable
             title="Latest Ending Count by Branch"
             onExport={() => downloadCSV("ending.csv", toCSV(filteredItems, [
