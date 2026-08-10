@@ -658,11 +658,12 @@ const REPORT_TABS = ["Stock Balance", "Purchases", "Supplier Ledger", "Demand vs
 function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack }) {
   const [tab, setTab] = useState(REPORT_TABS[0]);
   const [q, setQ] = useState("");
+  const [catFilter, setCatFilter] = useState("");
   const [editPurchaseId, setEditPurchaseId] = useState(null);
   const [editPurchaseDraft, setEditPurchaseDraft] = useState({});
   const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
   const supplierName = (id) => db.suppliers.find(s => s.id === id)?.name || id;
-  const filteredItems = db.items.filter(i => i.name.toLowerCase().includes(q.toLowerCase()));
+  const filteredItems = db.items.filter(i => i.name.toLowerCase().includes(q.toLowerCase()) && (!catFilter || i.category === catFilter));
 
   const startEditPurchase = (p) => { setEditPurchaseId(p.id); setEditPurchaseDraft({ qty: String(p.qty), rate: String(p.rate), paymentMode: p.paymentMode || "credit" }); };
   const saveEditPurchase = () => {
@@ -688,8 +689,14 @@ function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack 
           ))}
         </div>
       </div>
-      <div className="px-4 mt-2 mb-3 relative">
-        <input className="w-full bg-white border-2 border-[#EAE4D4] rounded-xl pl-4 pr-3 py-2.5 text-sm" placeholder="Search item…" value={q} onChange={e => setQ(e.target.value)} />
+      <div className="px-4 mt-2 mb-3 flex gap-2">
+        <input className="flex-1 bg-white border-2 border-[#EAE4D4] rounded-xl pl-4 pr-3 py-2.5 text-sm" placeholder="Search item…" value={q} onChange={e => setQ(e.target.value)} />
+        {(tab === "Stock Balance" || tab === "Demand vs Issue" || tab === "Ending") && (
+          <select className="bg-white border-2 border-[#EAE4D4] rounded-xl px-2.5 py-2.5 text-sm font-medium max-w-[130px]" value={catFilter} onChange={e => setCatFilter(e.target.value)}>
+            <option value="">All categories</option>
+            {db.categories.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
       </div>
       <div className="px-4 pb-8">
         {tab === "Stock Balance" && (
