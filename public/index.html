@@ -600,7 +600,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Purchases", "Supplier Ledger", "Demand vs Issue", "By Category", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Purchases", "Supplier Ledger", "Demand vs Issue", "By Category", "Ending", "Activity Log"];
 
 function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
   const [tab, setTab] = useState(REPORT_TABS[0]);
@@ -708,6 +708,34 @@ function ReportsScreen({ db, stockOf, balanceOf, onBack }) {
             </table>
           </ReportTable>
         )}
+  {tab === "Ending" && (
+          <ReportTable
+            title="Latest Ending Count by Branch"
+            onExport={() => downloadCSV("ending.csv", toCSV(filteredItems, [
+              { label: "Item", get: i => i.name },
+              ...BRANCHES.map(b => ({ label: b, get: i => { const e = db.endings.find(x => x.itemId === i.id && x.branch === b); return e ? e.qty : ""; } })),
+              { label: "Last Counted", get: i => { const e = db.endings.find(x => BRANCHES.some(b => x.branch === b) && x.itemId === i.id); return e ? e.date : ""; } },
+            ]))}
+          >
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th>{BRANCHES.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}</tr></thead>
+              <tbody>
+                {filteredItems.map(i => {
+                  const rows = BRANCHES.map(b => db.endings.find(x => x.itemId === i.id && x.branch === b));
+                  if (rows.every(r => !r)) return null;
+                  return (
+                    <tr key={i.id} className="border-t border-[#EFEBDF]">
+                      <td className="py-2 font-medium">{i.name}</td>
+                      {rows.map((e, idx) => <td key={idx} className="text-right py-2 font-mono">{e ? e.qty : "–"}</td>)}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div className="text-[11px] text-[#8A9690] mt-3">Shows the most recent count recorded per branch. Ending doesn't affect Stock Balance — compare the two to spot mismatches.</div>
+          </ReportTable>
+        )}
+        {tab === "Activity Log" && (
         {tab === "Activity Log" && (
         {tab === "Activity Log" && (
           <ReportTable title="User Activity" onExport={() => downloadCSV("activity-log.csv", toCSV(db.log, [{ label: "Time", get: l => l.at }, { label: "User", get: l => l.user }, { label: "Action", get: l => l.action }, { label: "Detail", get: l => l.detail }]))}>
