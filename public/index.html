@@ -317,9 +317,11 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
   const supplier = db.suppliers.find(s => s.id === supplierId);
   const supplierItems = supplier ? db.items.filter(i => supplier.itemIds.includes(i.id)) : [];
   const supplierCats = [...new Set(supplierItems.map(i => i.category))];
-  const visibleItems = category ? supplierItems.filter(i => i.category === category) : supplierItems;
+  const visibleItems = payMode === "cash"
+    ? (category ? db.items.filter(i => i.category === category) : [])
+    : (category ? supplierItems.filter(i => i.category === category) : supplierItems);
 
-  useEffect(() => { setRows({}); setCategory(""); }, [supplierId]);
+  useEffect(() => { setRows({}); setCategory(""); }, [supplierId, payMode]);
 
   // pricing per item, recomputed whenever today's rates change
   const pricingByItem = useMemo(() => {
@@ -401,11 +403,11 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
           {anyCashOnly && <div className="text-xs text-[#B3562C] font-semibold mt-1.5">One or more selected items are cash-only</div>}
         </Field>
 
-        {payMode === "cash" && supplierCats.length > 0 && (
+        {payMode === "cash" && (
           <Field label="Category">
             <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>
-              <option value="">All ({supplierItems.length} items)</option>
-              {supplierCats.map(c => <option key={c} value={c}>{c}</option>)}
+              <option value="">Select a category…</option>
+              {db.categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </Field>
         )}
@@ -422,7 +424,9 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
         ))}
 
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">
-          {supplier ? `${supplier.name} — Items & Rates` : "Select a supplier"}
+          {payMode === "cash"
+            ? (category ? `${category} — Items & Rates` : "Select a category")
+            : (supplier ? `${supplier.name} — Items & Rates` : "Select a supplier")}
         </div>
         <div className="space-y-2.5 mb-5">
           {visibleItems.map(it => {
@@ -447,7 +451,8 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
               </div>
             );
           })}
-          {supplier && visibleItems.length === 0 && <div className="text-sm text-[#8A9690]">No items linked to this supplier yet — add them in Admin.</div>}
+          {payMode !== "cash" && supplier && visibleItems.length === 0 && <div className="text-sm text-[#8A9690]">No items linked to this supplier yet — add them in Admin.</div>}
+          {payMode === "cash" && category && visibleItems.length === 0 && <div className="text-sm text-[#8A9690]">No items in this category yet — add them in Admin.</div>}
         </div>
 
         <div className="bg-[#2C3931] text-[#F4EFE4] rounded-xl p-4 mb-5 flex items-center justify-between">
