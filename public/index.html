@@ -165,15 +165,16 @@ function App() {
 
   const flash = (msg, kind = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 2200); };
   const addLog = (dbNext, action, detail) => {
-    dbNext.log = [{ id: uid("l"), at: nowStr(), user: session?.name || "-", action, detail }, ...dbNext.log].slice(0, 2000);
+    dbNext.log = [{ id: uid("l"), at: nowStr(), date: todayStr(), user: session?.name || "-", action, detail }, ...dbNext.log].slice(0, 2000);
   };
 
-  const stockOf = useMemo(() => (branch, itemId) => {
+  const stockOf = useMemo(() => (branch, itemId, asOfDate) => {
     if (!db) return 0;
     let qty = 0;
-    if (branch === "Store") db.purchases.forEach(p => { if (p.itemId === itemId) qty += Number(p.qty); });
+    if (branch === "Store") db.purchases.forEach(p => { if (p.itemId === itemId && (!asOfDate || p.date <= asOfDate)) qty += Number(p.qty); });
     db.issues.forEach(iss => {
       if (iss.itemId !== itemId) return;
+      if (asOfDate && iss.date > asOfDate) return;
       if (iss.from === branch) qty -= Number(iss.qty);
       if (iss.to === branch) qty += Number(iss.qty);
     });
@@ -694,33 +695,32 @@ function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack 
       </div>
       <div className="px-4 mt-2 mb-3 flex gap-2 flex-wrap">
         <input className="flex-1 min-w-[110px] bg-white border-2 border-[#EAE4D4] rounded-xl pl-4 pr-3 py-2.5 text-sm" placeholder="Search item…" value={q} onChange={e => setQ(e.target.value)} />
-        {(tab === "Stock Balance" || tab === "Demand vs Issue" || tab === "Ending") && (
+        {(tab === "Stock Balance" || tab === "Demand vs Issue" || tab === "Ending" || tab === "By Category") && (
           <select className="bg-white border-2 border-[#EAE4D4] rounded-xl px-2.5 py-2.5 text-sm font-medium max-w-[130px]" value={catFilter} onChange={e => setCatFilter(e.target.value)}>
             <option value="">All categories</option>
             {db.categories.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         )}
-        {(tab === "Ending" || tab === "Purchases" || tab === "Demand vs Issue" || tab === "Supplier Ledger") && (
-          <input type="date" className="bg-white border-2 border-[#EAE4D4] rounded-xl px-2.5 py-2.5 text-sm font-medium" value={dateFilter} onChange={e => setDateFilter(e.target.value)} />
-        )}
-        {(tab === "Ending" || tab === "Purchases" || tab === "Demand vs Issue" || tab === "Supplier Ledger") && dateFilter && (
+        <input type="date" className="bg-white border-2 border-[#EAE4D4] rounded-xl px-2.5 py-2.5 text-sm font-medium" value={dateFilter} onChange={e => setDateFilter(e.target.value)} />
+        {dateFilter && (
           <button onClick={() => setDateFilter("")} className="text-xs font-semibold text-[#5C6B62] bg-[#F0ECE0] px-3 rounded-xl">All dates</button>
         )}
       </div>
       <div className="px-4 pb-8">
         {tab === "Stock Balance" && (
-          <ReportTable title="Stock Balance by Branch" onExport={() => downloadCSV("stock-balance.csv", toCSV(filteredItems, [{ label: "Item", get: i => i.name }, { label: "Category", get: i => i.category }, ...BRANCHES.map(b => ({ label: b, get: i => stockOf(b, i.id) }))]))}>
+          <ReportTable title={dateFilter ? `Stock Balance as of ${dateFilter}` : "Stock Balance by Branch"} onExport={() => downloadCSV("stock-balance.csv", toCSV(filteredItems, [{ label: "Item", get: i => i.name }, { label: "Category", get: i => i.category }, ...BRANCHES.map(b => ({ label: b, get: i => stockOf(b, i.id, dateFilter) }))]))}>
             <table className="w-full text-sm">
               <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th>{BRANCHES.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}</tr></thead>
               <tbody>
                 {filteredItems.map(i => (
                   <tr key={i.id} className="border-t border-[#EFEBDF]">
                     <td className="py-2 font-medium">{i.name}</td>
-                    {BRANCHES.map(b => { const v = stockOf(b, i.id); return <td key={b} className={`text-right py-2 font-mono ${v < 0 ? "text-[#B33A3A]" : v <= 5 && v >= 0 ? "text-[#B3562C] font-bold" : ""}`}>{v}</td>; })}
+                    {BRANCHES.map(b => { const v = stockOf(b, i.id, dateFilter); return <td key={b} className={`text-right py-2 font-mono ${v < 0 ? "text-[#B33A3A]" : v <= 5 && v >= 0 ? "text-[#B3562C] font-bold" : ""}`}>{v}</td>; })}
                   </tr>
                 ))}
               </tbody>
             </table>
+            {dateFilter && <div className="text-[11px] text-[#8A9690] mt-3">Includes all purchases and issues up to and including this date.</div>}
           </ReportTable>
         )}
         {tab === "Purchases" && (
@@ -831,21 +831,21 @@ function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack 
         )}
         {tab === "By Category" && (
           <ReportTable
-            title="Demand / Issued / Ending by Category"
+            title={dateFilter ? `Demand / Issued / Ending by Category — ${dateFilter}` : "Demand / Issued / Ending by Category"}
             onExport={() => downloadCSV("by-category.csv", toCSV(db.categories, [
               { label: "Category", get: c => c },
-              { label: "Demanded", get: c => db.demands.filter(d => db.items.find(i => i.id === d.itemId)?.category === c).reduce((a, d) => a + d.qty, 0) },
-              { label: "Issued", get: c => db.issues.filter(x => db.items.find(i => i.id === x.itemId)?.category === c).reduce((a, x) => a + x.qty, 0) },
-              { label: "Ending", get: c => db.endings.filter(x => db.items.find(i => i.id === x.itemId)?.category === c).reduce((a, x) => a + x.qty, 0) },
+              { label: "Demanded", get: c => db.demands.filter(d => db.items.find(i => i.id === d.itemId)?.category === c && (!dateFilter || d.date === dateFilter)).reduce((a, d) => a + d.qty, 0) },
+              { label: "Issued", get: c => db.issues.filter(x => db.items.find(i => i.id === x.itemId)?.category === c && (!dateFilter || x.date === dateFilter)).reduce((a, x) => a + x.qty, 0) },
+              { label: "Ending", get: c => db.endings.filter(x => db.items.find(i => i.id === x.itemId)?.category === c && (!dateFilter || x.date === dateFilter)).reduce((a, x) => a + x.qty, 0) },
             ]))}
           >
             <table className="w-full text-sm">
               <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Category</th><th className="text-right py-1.5">Demanded</th><th className="text-right py-1.5">Issued</th><th className="text-right py-1.5">Ending</th></tr></thead>
               <tbody>
-                {db.categories.map(c => {
-                  const dem = db.demands.filter(d => db.items.find(i => i.id === d.itemId)?.category === c).reduce((a, d) => a + d.qty, 0);
-                  const iss = db.issues.filter(x => db.items.find(i => i.id === x.itemId)?.category === c).reduce((a, x) => a + x.qty, 0);
-                  const end = db.endings.filter(x => db.items.find(i => i.id === x.itemId)?.category === c).reduce((a, x) => a + x.qty, 0);
+                {(catFilter ? [catFilter] : db.categories).map(c => {
+                  const dem = db.demands.filter(d => db.items.find(i => i.id === d.itemId)?.category === c && (!dateFilter || d.date === dateFilter)).reduce((a, d) => a + d.qty, 0);
+                  const iss = db.issues.filter(x => db.items.find(i => i.id === x.itemId)?.category === c && (!dateFilter || x.date === dateFilter)).reduce((a, x) => a + x.qty, 0);
+                  const end = db.endings.filter(x => db.items.find(i => i.id === x.itemId)?.category === c && (!dateFilter || x.date === dateFilter)).reduce((a, x) => a + x.qty, 0);
                   if (dem === 0 && iss === 0 && end === 0) return null;
                   return (
                     <tr key={c} className="border-t border-[#EFEBDF]">
@@ -887,8 +887,8 @@ function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack 
           </ReportTable>
         )}
         {tab === "Activity Log" && (
-          <ReportTable title="User Activity" onExport={() => downloadCSV("activity-log.csv", toCSV(db.log, [{ label: "Time", get: l => l.at }, { label: "User", get: l => l.user }, { label: "Action", get: l => l.action }, { label: "Detail", get: l => l.detail }]))}>
-            {db.log.slice(0, 200).map(l => (
+          <ReportTable title={dateFilter ? `User Activity — ${dateFilter}` : "User Activity"} onExport={() => downloadCSV("activity-log.csv", toCSV(db.log.filter(l => !dateFilter || l.date === dateFilter), [{ label: "Time", get: l => l.at }, { label: "User", get: l => l.user }, { label: "Action", get: l => l.action }, { label: "Detail", get: l => l.detail }]))}>
+            {db.log.filter(l => !dateFilter || l.date === dateFilter).slice(0, 200).map(l => (
               <div key={l.id} className="bg-white rounded-xl p-3 mb-2 border border-[#EAE4D4]">
                 <div className="flex justify-between text-sm"><span className="font-semibold">{l.action}</span><span className="text-xs text-[#8A9690]">{l.at}</span></div>
                 <div className="text-xs text-[#5C6B62] mt-0.5">{l.user} · {l.detail}</div>
@@ -978,11 +978,19 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next);
   };
 
+  const resetTransactions = () => {
+    if (!window.confirm("This deletes ALL purchase, issue, ending, demand, and payment entries plus the activity log — permanently. Items, suppliers, users, and rates stay. Continue?")) return;
+    if (!window.confirm("Are you sure? This cannot be undone.")) return;
+    const next = { ...db, purchases: [], issues: [], endings: [], demands: [], payments: [], todayRates: {}, log: [] };
+    persist(next);
+    flash("All entries cleared — items, suppliers and users kept");
+  };
+
   return (
     <div>
       <TopBar title="Admin" onBack={onBack} />
       <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
-        {["Items", "Suppliers", "Rates", "Users"].map(t => (
+        {["Items", "Suppliers", "Rates", "Users", "Reset"].map(t => (
           <button key={t} onClick={() => setTab(t)} className={`flex-1 whitespace-nowrap py-2.5 px-3 rounded-xl text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
         ))}
       </div>
@@ -1128,6 +1136,16 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               </div>
             ))}
           </React.Fragment>
+        )}
+        {tab === "Reset" && (
+          <div className="bg-white rounded-xl p-4 border-2 border-[#B33A3A]">
+            <div className="font-bold text-[#B33A3A] mb-1">Clear all entries</div>
+            <div className="text-sm text-[#5C6B62] mb-4">
+              Deletes every Purchase, Issue, Ending, Demand, and Payment record, plus the Activity Log and today's rates —
+              for a fresh start. Your Items, Suppliers, Users, and Rate settings are kept.
+            </div>
+            <button onClick={resetTransactions} className="bg-[#B33A3A] text-white w-full py-3 rounded-xl font-semibold">Delete All Entries</button>
+          </div>
         )}
       </div>
     </div>
