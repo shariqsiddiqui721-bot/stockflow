@@ -185,7 +185,7 @@ const SEED = {
   },
   todayRates: {},
   users: [
-    { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "ending", "demand", "payment", "reports", "admin"], branches: ["Store", "FB", "North"] },
+    { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "ending", "demand", "adjustment", "payment", "reports", "admin"], branches: ["Store", "FB", "North"] },
     { id: "u2", name: "Ahmed", pin: "2233", permissions: ["purchase", "issue", "reports"], branches: ["Store"] },
     { id: "u3", name: "Bilal", pin: "3344", permissions: ["ending", "demand"], branches: ["FB", "North"] },
   ],
@@ -194,6 +194,7 @@ const SEED = {
   endings: [],
   demands: [],
   payments: [],
+  adjustments: [],
   log: [],
 };
 
