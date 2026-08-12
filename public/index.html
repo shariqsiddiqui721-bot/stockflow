@@ -22,7 +22,7 @@
 const { useState, useEffect, useMemo, useCallback } = React;
 
 const BRANCHES = ["Store", "FB", "North"];
-const ALL_PERMISSIONS = ["purchase", "issue", "ending", "demand", "payment", "reports", "admin"];
+const ALL_PERMISSIONS = ["purchase", "issue", "ending", "demand", "adjustment", "payment", "reports", "admin"];
 const uid = (p) => p + Math.random().toString(36).slice(2, 9);
 // Business day runs 9:00 AM to 6:00 AM the next calendar day.
 // Anything before 9 AM still counts as "yesterday's" business date.
@@ -142,6 +142,19 @@ function BranchChips({ selected, onToggle }) {
   );
 }
 
+function ReportTabChips({ selected, onToggle }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {REPORT_TABS.map(t => (
+        <button key={t} type="button" onClick={() => onToggle(t)}
+          className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${selected.includes(t) ? "bg-[#4A6FA5] text-white border-[#4A6FA5]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>
+          {t}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /* ---------- App ---------- */
 
 function App() {
@@ -178,6 +191,11 @@ function App() {
       if (iss.from === branch) qty -= Number(iss.qty);
       if (iss.to === branch) qty += Number(iss.qty);
     });
+    (db.adjustments || []).forEach(a => {
+      if (a.itemId !== itemId || a.branch !== branch) return;
+      if (asOfDate && a.date > asOfDate) return;
+      qty += Number(a.qty);
+    });
     return qty;
   }, [db]);
 
@@ -207,6 +225,7 @@ function App() {
       {screen === "issue" && <IssueScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "ending" && <EndingScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "demand" && <DemandScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "adjustment" && <AdjustmentScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "payment" && <PaymentScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "reports" && <ReportsScreen {...commonProps} onBack={() => setScreen("menu")} />}
       {screen === "admin" && <AdminScreen {...commonProps} onBack={() => setScreen("menu")} />}
@@ -264,6 +283,7 @@ function MainMenu({ session, onLogout, setScreen }) {
     { key: "issue", label: "Issue", sub: "Move to branches", emoji: "🔀", color: "#2B6E63" },
     { key: "ending", label: "Ending", sub: "Closing count", emoji: "📋", color: "#4A6FA5" },
     { key: "demand", label: "Demand", sub: "Request items", emoji: "🧾", color: "#B3562C" },
+    { key: "adjustment", label: "Adjustment", sub: "Wastage / theft", emoji: "⚖️", color: "#8A4A4A" },
     { key: "payment", label: "Payment", sub: "Pay suppliers", emoji: "💰", color: "#7A5C2E" },
   ].filter(t => perms.includes(t.key));
 
@@ -562,6 +582,58 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
   );
 }
 
+/* ---------- Adjustment (wastage / theft / found stock) ---------- */
+
+function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const [branch, setBranch] = useState(myBranches[0]);
+  const [category, setCategory] = useState(db.categories[0]);
+  const [kind, setKind] = useState("wastage"); // wastage | theft | damage | found
+  const [reason, setReason] = useState("");
+  const [values, setValues] = useState({}); // itemId -> qty (always entered positive, sign applied on save)
+  const items = db.items.filter(i => i.category === category);
+  useEffect(() => { setValues({}); }, [category, branch]);
+  const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
+  const isLoss = kind !== "found";
+
+  const save = () => {
+    if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
+    const recs = entries.map(([itemId, v]) => ({
+      id: uid("adj"), date: todayStr(), branch, itemId,
+      qty: isLoss ? -Math.abs(Number(v)) : Math.abs(Number(v)),
+      kind, reason: reason.trim(), userId: session.id,
+    }));
+    const next = { ...db, adjustments: [...recs, ...(db.adjustments || [])] };
+    addLog(next, "Adjustment", `${branch}: ${entries.length} item(s) — ${kind}${reason ? " (" + reason + ")" : ""}`);
+    persist(next); flash("Adjustment saved"); setValues({}); setReason("");
+  };
+
+  return (
+    <div>
+      <TopBar title="Adjustment" onBack={onDone} />
+      <div className="p-5">
+        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
+        <Field label="Type">
+          <div className="grid grid-cols-4 gap-1.5">
+            {["wastage", "theft", "damage", "found"].map(k => (
+              <button key={k} onClick={() => setKind(k)} className={`py-2.5 rounded-lg text-xs font-semibold capitalize border-2 ${kind === k ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>{k}</button>
+            ))}
+          </div>
+        </Field>
+        <Field label="Note (optional)">
+          <input className={numCls + " font-sans"} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. spoiled overnight" />
+        </Field>
+        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">
+          {isLoss ? "Quantity Lost" : "Quantity Found"}
+        </div>
+        <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} stockCheck={(id) => stockOf(branch, id)} /></div>
+        <button className={btnPrimary} onClick={save}>Save Adjustment</button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Demand ---------- */
 
 function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
@@ -654,13 +726,16 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Purchases", "Supplier Ledger", "Demand vs Issue", "By Category", "Ending", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Supplier Ledger", "Demand vs Issue", "By Category", "Ending", "Adjustments", "Activity Log"];
 
-function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack }) {
-  const [tab, setTab] = useState(REPORT_TABS[0]);
+function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf, onBack }) {
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const myTabs = (session.reportTabs && session.reportTabs.length) ? REPORT_TABS.filter(t => session.reportTabs.includes(t)) : REPORT_TABS;
+  const [tab, setTab] = useState(myTabs[0] || REPORT_TABS[0]);
   const [q, setQ] = useState("");
   const [catFilter, setCatFilter] = useState("");
   const [dateFilter, setDateFilter] = useState(todayStr());
+  const [muBranch, setMuBranch] = useState(myBranches[0]);
   const [ledgerSupplierId, setLedgerSupplierId] = useState(db.suppliers[0]?.id || "");
   const ledgerSupplier = db.suppliers.find(s => s.id === ledgerSupplierId);
   const [editPurchaseId, setEditPurchaseId] = useState(null);
@@ -683,12 +758,21 @@ function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack 
     persist(next); flash("Purchase deleted");
   };
 
+  // Opening balance for an item at a branch: stock as of the day before the given date.
+  const openingOf = (branch, itemId, date) => {
+    if (!date) return 0;
+    const d = new Date(date + "T00:00:00");
+    d.setDate(d.getDate() - 1);
+    const prevDay = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    return stockOf(branch, itemId, prevDay);
+  };
+
   return (
     <div>
       <TopBar title="Reports" onBack={onBack} />
       <div className="px-4 pt-3">
         <div className="flex gap-2 overflow-x-auto pb-2 -mx-1 px-1">
-          {REPORT_TABS.map(t => (
+          {myTabs.map(t => (
             <button key={t} onClick={() => setTab(t)} className={`whitespace-nowrap px-3.5 py-2 rounded-full text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
           ))}
         </div>
@@ -708,19 +792,63 @@ function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack 
       </div>
       <div className="px-4 pb-8">
         {tab === "Stock Balance" && (
-          <ReportTable title={dateFilter ? `Stock Balance as of ${dateFilter}` : "Stock Balance by Branch"} onExport={() => downloadCSV("stock-balance.csv", toCSV(filteredItems, [{ label: "Item", get: i => i.name }, { label: "Category", get: i => i.category }, ...BRANCHES.map(b => ({ label: b, get: i => stockOf(b, i.id, dateFilter) }))]))}>
+          <ReportTable title={dateFilter ? `Stock Balance as of ${dateFilter}` : "Stock Balance by Branch"} onExport={() => downloadCSV("stock-balance.csv", toCSV(filteredItems, [{ label: "Item", get: i => i.name }, { label: "Category", get: i => i.category }, ...myBranches.map(b => ({ label: b, get: i => stockOf(b, i.id, dateFilter) }))]))}>
             <table className="w-full text-sm">
-              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th>{BRANCHES.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}</tr></thead>
+              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th>{myBranches.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}</tr></thead>
               <tbody>
                 {filteredItems.map(i => (
                   <tr key={i.id} className="border-t border-[#EFEBDF]">
                     <td className="py-2 font-medium">{i.name}</td>
-                    {BRANCHES.map(b => { const v = stockOf(b, i.id, dateFilter); return <td key={b} className={`text-right py-2 font-mono ${v < 0 ? "text-[#B33A3A]" : v <= 5 && v >= 0 ? "text-[#B3562C] font-bold" : ""}`}>{v}</td>; })}
+                    {myBranches.map(b => { const v = stockOf(b, i.id, dateFilter); return <td key={b} className={`text-right py-2 font-mono ${v < 0 ? "text-[#B33A3A]" : v <= 5 && v >= 0 ? "text-[#B3562C] font-bold" : ""}`}>{v}</td>; })}
                   </tr>
                 ))}
               </tbody>
             </table>
-            {dateFilter && <div className="text-[11px] text-[#8A9690] mt-3">Includes all purchases and issues up to and including this date.</div>}
+            {dateFilter && <div className="text-[11px] text-[#8A9690] mt-3">Includes all purchases, issues, and adjustments up to and including this date.</div>}
+          </ReportTable>
+        )}
+        {tab === "Material Used" && (
+          <ReportTable
+            title={`Material Used at ${muBranch} — ${dateFilter || "today"}`}
+            onExport={() => downloadCSV("material-used.csv", toCSV(filteredItems, [
+              { label: "Item", get: i => i.name },
+              { label: "Opening", get: i => openingOf(muBranch, i.id, dateFilter || todayStr()) },
+              { label: "Received", get: i => db.issues.filter(x => x.itemId === i.id && x.to === muBranch && x.date === (dateFilter || todayStr())).reduce((a, x) => a + x.qty, 0) + (muBranch === "Store" ? db.purchases.filter(p => p.itemId === i.id && p.date === (dateFilter || todayStr())).reduce((a, p) => a + p.qty, 0) : 0) },
+              { label: "Adjustment", get: i => (db.adjustments || []).filter(a => a.itemId === i.id && a.branch === muBranch && a.date === (dateFilter || todayStr())).reduce((a, x) => a + x.qty, 0) },
+              { label: "Ending", get: i => { const e = db.endings.find(x => x.itemId === i.id && x.branch === muBranch && x.date === (dateFilter || todayStr())); return e ? e.qty : ""; } },
+              { label: "Used", get: i => { const eff = dateFilter || todayStr(); const e = db.endings.find(x => x.itemId === i.id && x.branch === muBranch && x.date === eff); if (!e) return ""; const opening = openingOf(muBranch, i.id, eff); const received = db.issues.filter(x => x.itemId === i.id && x.to === muBranch && x.date === eff).reduce((a, x) => a + x.qty, 0) + (muBranch === "Store" ? db.purchases.filter(p => p.itemId === i.id && p.date === eff).reduce((a, p) => a + p.qty, 0) : 0); return opening + received - e.qty; } },
+            ]))}
+          >
+            <div className="mb-3">
+              <select className="w-full bg-white border-2 border-[#D8D2C2] rounded-xl px-3 py-2.5 text-sm font-medium" value={muBranch} onChange={e => setMuBranch(e.target.value)}>
+                {myBranches.map(b => <option key={b}>{b}</option>)}
+              </select>
+            </div>
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Open</th><th className="text-right py-1.5">Recv</th><th className="text-right py-1.5">Adj</th><th className="text-right py-1.5">End</th><th className="text-right py-1.5 font-bold">Used</th></tr></thead>
+              <tbody>
+                {filteredItems.map(i => {
+                  const eff = dateFilter || todayStr();
+                  const e = db.endings.find(x => x.itemId === i.id && x.branch === muBranch && x.date === eff);
+                  const opening = openingOf(muBranch, i.id, eff);
+                  const received = db.issues.filter(x => x.itemId === i.id && x.to === muBranch && x.date === eff).reduce((a, x) => a + x.qty, 0) + (muBranch === "Store" ? db.purchases.filter(p => p.itemId === i.id && p.date === eff).reduce((a, p) => a + p.qty, 0) : 0);
+                  const adj = (db.adjustments || []).filter(a => a.itemId === i.id && a.branch === muBranch && a.date === eff).reduce((a, x) => a + x.qty, 0);
+                  const used = e ? opening + received - e.qty : null;
+                  if (opening === 0 && received === 0 && !e && adj === 0) return null;
+                  return (
+                    <tr key={i.id} className="border-t border-[#EFEBDF]">
+                      <td className="py-2 font-medium">{i.name}</td>
+                      <td className="text-right py-2 font-mono">{opening}</td>
+                      <td className="text-right py-2 font-mono">{received}</td>
+                      <td className={`text-right py-2 font-mono ${adj < 0 ? "text-[#B33A3A]" : adj > 0 ? "text-[#2B6E63]" : ""}`}>{adj !== 0 ? adj : "–"}</td>
+                      <td className="text-right py-2 font-mono">{e ? e.qty : "–"}</td>
+                      <td className="text-right py-2 font-mono font-bold">{used !== null ? used : "–"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div className="text-[11px] text-[#8A9690] mt-3">Used = Opening (yesterday's ending) + Received − Ending. Set a date above to check a different day.</div>
           </ReportTable>
         )}
         {tab === "Purchases" && (
@@ -865,14 +993,14 @@ function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack 
             title={dateFilter ? `Ending Count — ${dateFilter}` : "Ending Count — All Dates (latest each)"}
             onExport={() => downloadCSV("ending.csv", toCSV(filteredItems, [
               { label: "Item", get: i => i.name },
-              ...BRANCHES.map(b => ({ label: b, get: i => { const e = db.endings.find(x => x.itemId === i.id && x.branch === b && (!dateFilter || x.date === dateFilter)); return e ? e.qty : ""; } })),
+              ...myBranches.map(b => ({ label: b, get: i => { const e = db.endings.find(x => x.itemId === i.id && x.branch === b && (!dateFilter || x.date === dateFilter)); return e ? e.qty : ""; } })),
             ]))}
           >
             <table className="w-full text-sm">
-              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th>{BRANCHES.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}</tr></thead>
+              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th>{myBranches.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}</tr></thead>
               <tbody>
                 {filteredItems.map(i => {
-                  const rows = BRANCHES.map(b => db.endings.find(x => x.itemId === i.id && x.branch === b && (!dateFilter || x.date === dateFilter)));
+                  const rows = myBranches.map(b => db.endings.find(x => x.itemId === i.id && x.branch === b && (!dateFilter || x.date === dateFilter)));
                   if (rows.every(r => !r)) return null;
                   return (
                     <tr key={i.id} className="border-t border-[#EFEBDF]">
@@ -884,6 +1012,26 @@ function ReportsScreen({ db, persist, addLog, flash, stockOf, balanceOf, onBack 
               </tbody>
             </table>
             <div className="text-[11px] text-[#8A9690] mt-3">{dateFilter ? "Showing counts recorded on this date only." : "Showing the latest count ever recorded per branch, across all dates."} Ending doesn't affect Stock Balance — compare the two to spot mismatches.</div>
+          </ReportTable>
+        )}
+        {tab === "Adjustments" && (
+          <ReportTable
+            title={dateFilter ? `Adjustments — ${dateFilter}` : "Adjustments — All Dates"}
+            onExport={() => downloadCSV("adjustments.csv", toCSV((db.adjustments || []).filter(a => myBranches.includes(a.branch) && (!dateFilter || a.date === dateFilter)), [
+              { label: "Date", get: a => a.date }, { label: "Branch", get: a => a.branch }, { label: "Item", get: a => itemName(a.itemId) },
+              { label: "Qty", get: a => a.qty }, { label: "Type", get: a => a.kind }, { label: "Note", get: a => a.reason },
+            ]))}
+          >
+            {(db.adjustments || []).filter(a => myBranches.includes(a.branch) && (!dateFilter || a.date === dateFilter) && itemName(a.itemId).toLowerCase().includes(q.toLowerCase())).slice(0, 200).map(a => (
+              <div key={a.id} className="flex justify-between items-center py-2 border-t border-[#EFEBDF] first:border-t-0">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">{itemName(a.itemId)}</div>
+                  <div className="text-[11px] text-[#8A9690] capitalize">{a.branch} · {a.date} · {a.kind}{a.reason ? " — " + a.reason : ""}</div>
+                </div>
+                <div className={`font-mono font-bold text-sm ${a.qty < 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{a.qty > 0 ? "+" : ""}{a.qty}</div>
+              </div>
+            ))}
+            {(db.adjustments || []).filter(a => myBranches.includes(a.branch) && (!dateFilter || a.date === dateFilter)).length === 0 && <div className="text-sm text-[#8A9690]">No adjustments{dateFilter ? " on this date" : ""}.</div>}
           </ReportTable>
         )}
         {tab === "Activity Log" && (
@@ -926,6 +1074,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newUserPin, setNewUserPin] = useState("");
   const [newUserPerms, setNewUserPerms] = useState(["purchase"]);
   const [newUserBranches, setNewUserBranches] = useState([...BRANCHES]);
+  const [newUserReportTabs, setNewUserReportTabs] = useState([...REPORT_TABS]);
   const [ratesSupplierId, setRatesSupplierId] = useState(db.suppliers[0]?.id || "");
   const [editItemId, setEditItemId] = useState(null);
   const [editItemDraft, setEditItemDraft] = useState({});
@@ -952,7 +1101,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next); setEditSupplierId(null); flash("Supplier updated");
   };
 
-  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); flash("User added"); };
+  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); flash("User added"); };
   const delUser = (id) => persist({ ...db, users: db.users.filter(u => u.id !== id) });
   const toggleUserPerm = (userId, perm) => {
     const next = { ...db, users: db.users.map(u => {
@@ -967,6 +1116,15 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
       if (u.id !== userId) return u;
       const has = (u.branches || []).includes(branch);
       return { ...u, branches: has ? u.branches.filter(b => b !== branch) : [...(u.branches || []), branch] };
+    }) };
+    persist(next);
+  };
+  const toggleUserReportTab = (userId, t) => {
+    const next = { ...db, users: db.users.map(u => {
+      if (u.id !== userId) return u;
+      const cur = (u.reportTabs && u.reportTabs.length) ? u.reportTabs : [...REPORT_TABS];
+      const has = cur.includes(t);
+      return { ...u, reportTabs: has ? cur.filter(x => x !== t) : [...cur, t] };
     }) };
     persist(next);
   };
@@ -1121,6 +1279,8 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               <div className="mb-3"><PermChips selected={newUserPerms} onToggle={(p) => setNewUserPerms(v => v.includes(p) ? v.filter(x => x !== p) : [...v, p])} /></div>
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Branches</div>
               <div className="mb-3"><BranchChips selected={newUserBranches} onToggle={(b) => setNewUserBranches(v => v.includes(b) ? v.filter(x => x !== b) : [...v, b])} /></div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Report tabs visible</div>
+              <div className="mb-3"><ReportTabChips selected={newUserReportTabs} onToggle={(t) => setNewUserReportTabs(v => v.includes(t) ? v.filter(x => x !== t) : [...v, t])} /></div>
               <button onClick={addUser} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add User</button>
             </div>
             {db.users.map(u => (
@@ -1133,6 +1293,12 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 <PermChips selected={u.permissions || []} onToggle={(p) => toggleUserPerm(u.id, p)} />
                 <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Branches</div>
                 <BranchChips selected={u.branches || []} onToggle={(b) => toggleUserBranch(u.id, b)} />
+                {(u.permissions || []).includes("reports") && (
+                  <React.Fragment>
+                    <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Report tabs visible</div>
+                    <ReportTabChips selected={(u.reportTabs && u.reportTabs.length) ? u.reportTabs : [...REPORT_TABS]} onToggle={(t) => toggleUserReportTab(u.id, t)} />
+                  </React.Fragment>
+                )}
               </div>
             ))}
           </React.Fragment>
