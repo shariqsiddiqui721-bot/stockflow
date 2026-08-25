@@ -788,7 +788,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Supplier Ledger", "Supplier Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Activity Log"];
 
 function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf, onBack }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
@@ -868,7 +868,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
       </div>
       <div className="px-4 mt-2 mb-3 flex gap-2 flex-wrap">
         <input className="flex-1 min-w-[110px] bg-white border-2 border-[#EAE4D4] rounded-xl pl-4 pr-3 py-2.5 text-sm" placeholder="Search item…" value={q} onChange={e => setQ(e.target.value)} />
-        {(tab === "Stock Balance" || tab === "Demand vs Issue" || tab === "Ending" || tab === "By Category" || tab === "Kitchens") && (
+        {(tab === "Stock Balance" || tab === "Demand vs Issue" || tab === "Ending" || tab === "By Category" || tab === "Kitchens" || tab === "Demand" || tab === "Material Used") && (
           <select className="bg-white border-2 border-[#EAE4D4] rounded-xl px-2.5 py-2.5 text-sm font-medium max-w-[130px]" value={catFilter} onChange={e => setCatFilter(e.target.value)}>
             <option value="">All categories</option>
             {db.categories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -896,50 +896,66 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             {dateFilter && <div className="text-[11px] text-[#8A9690] mt-3">Includes all purchases, issues, and adjustments up to and including this date.</div>}
           </ReportTable>
         )}
-        {tab === "Material Used" && (
-          <ReportTable
-            title={`Material Used at ${muBranch} — ${dateFilter || "today"}`}
-            onExport={() => downloadCSV("material-used.csv", toCSV(filteredItems, [
-              { label: "Item", get: i => i.name },
-              { label: "Opening", get: i => openingOf(muBranch, i.id, dateFilter || todayStr()) },
-              { label: "Received", get: i => db.issues.filter(x => x.itemId === i.id && x.to === muBranch && x.date === (dateFilter || todayStr())).reduce((a, x) => a + x.qty, 0) + (muBranch === "Store" ? db.purchases.filter(p => p.itemId === i.id && p.date === (dateFilter || todayStr())).reduce((a, p) => a + p.qty, 0) : 0) },
-              { label: "Adjustment", get: i => (db.adjustments || []).filter(a => a.itemId === i.id && a.branch === muBranch && a.date === (dateFilter || todayStr())).reduce((a, x) => a + x.qty, 0) },
-              { label: "Ending", get: i => { const e = db.endings.find(x => x.itemId === i.id && x.branch === muBranch && x.date === (dateFilter || todayStr())); return e ? e.qty : ""; } },
-              { label: "Used", get: i => { const eff = dateFilter || todayStr(); const e = db.endings.find(x => x.itemId === i.id && x.branch === muBranch && x.date === eff); if (!e) return ""; const opening = openingOf(muBranch, i.id, eff); const received = db.issues.filter(x => x.itemId === i.id && x.to === muBranch && x.date === eff).reduce((a, x) => a + x.qty, 0) + (muBranch === "Store" ? db.purchases.filter(p => p.itemId === i.id && p.date === eff).reduce((a, p) => a + p.qty, 0) : 0); return opening + received - e.qty; } },
-            ]))}
-          >
-            <div className="mb-3">
-              <select className="w-full bg-white border-2 border-[#D8D2C2] rounded-xl px-3 py-2.5 text-sm font-medium" value={muBranch} onChange={e => setMuBranch(e.target.value)}>
-                {myBranches.map(b => <option key={b}>{b}</option>)}
-              </select>
-            </div>
-            <table className="w-full text-sm">
-              <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Open</th><th className="text-right py-1.5">Recv</th><th className="text-right py-1.5">Adj</th><th className="text-right py-1.5">End</th><th className="text-right py-1.5 font-bold">Used</th></tr></thead>
-              <tbody>
-                {filteredItems.map(i => {
-                  const eff = dateFilter || todayStr();
-                  const e = db.endings.find(x => x.itemId === i.id && x.branch === muBranch && x.date === eff);
-                  const opening = openingOf(muBranch, i.id, eff);
-                  const received = db.issues.filter(x => x.itemId === i.id && x.to === muBranch && x.date === eff).reduce((a, x) => a + x.qty, 0) + (muBranch === "Store" ? db.purchases.filter(p => p.itemId === i.id && p.date === eff).reduce((a, p) => a + p.qty, 0) : 0);
-                  const adj = (db.adjustments || []).filter(a => a.itemId === i.id && a.branch === muBranch && a.date === eff).reduce((a, x) => a + x.qty, 0);
-                  const used = e ? opening + received - e.qty : null;
-                  if (opening === 0 && received === 0 && !e && adj === 0) return null;
-                  return (
-                    <tr key={i.id} className="border-t border-[#EFEBDF]">
-                      <td className="py-2 font-medium">{i.name}</td>
-                      <td className="text-right py-2 font-mono">{opening}</td>
-                      <td className="text-right py-2 font-mono">{received}</td>
-                      <td className={`text-right py-2 font-mono ${adj < 0 ? "text-[#B33A3A]" : adj > 0 ? "text-[#2B6E63]" : ""}`}>{adj !== 0 ? adj : "–"}</td>
-                      <td className="text-right py-2 font-mono">{e ? e.qty : "–"}</td>
-                      <td className="text-right py-2 font-mono font-bold">{used !== null ? used : "–"}</td>
+        {tab === "Material Used" && (() => {
+          const eff = dateFilter || todayStr();
+          // Build the selector list: Store (no kitchens) as a plain branch entry;
+          // branches with kitchens get an "All kitchens" combined entry plus one per kitchen.
+          const options = [];
+          myBranches.forEach(b => {
+            const ks = kitchensOf(db, b);
+            if (ks.length === 0) { options.push({ value: `b:${b}`, label: b, branch: b, kitchenId: null }); return; }
+            options.push({ value: `ba:${b}`, label: `${b} — All Kitchens`, branch: b, kitchenId: null });
+            ks.forEach(k => options.push({ value: `k:${k.id}`, label: `${k.name} (${b})`, branch: b, kitchenId: k.id }));
+          });
+          const current = options.find(o => o.value === muBranch) || options[0];
+          const branch = current?.branch, kitchenId = current?.kitchenId;
+
+          const demandOf = (itemId) => db.demands.filter(d => d.itemId === itemId && d.date === eff && d.branch === branch && (kitchenId ? d.kitchenId === kitchenId : true)).reduce((a, d) => a + d.qty, 0);
+          const receivedOf = (itemId) => db.issues.filter(x => x.itemId === itemId && x.date === eff && x.to === branch && (kitchenId ? x.kitchenId === kitchenId : true)).reduce((a, x) => a + x.qty, 0) + (!kitchenId && branch === "Store" ? db.purchases.filter(p => p.itemId === itemId && p.date === eff).reduce((a, p) => a + p.qty, 0) : 0);
+          const endingOf = (itemId) => db.endings.find(x => x.itemId === itemId && x.date === eff && x.branch === branch && (kitchenId ? x.kitchenId === kitchenId : true));
+
+          const rowsData = filteredItems.map(i => {
+            const demand = demandOf(i.id);
+            const received = receivedOf(i.id);
+            const e = endingOf(i.id);
+            const opening = kitchenId ? null : openingOf(branch, i.id, eff);
+            const used = e ? (opening || 0) + received - e.qty : null;
+            return { item: i, demand, received, ending: e ? e.qty : null, used };
+          }).filter(r => r.demand !== 0 || r.received !== 0 || r.ending !== null);
+
+          return (
+            <ReportTable
+              title={`Material Used — ${current?.label} — ${eff}`}
+              onExport={() => downloadCSV("material-used.csv", toCSV(rowsData, [
+                { label: "Item", get: r => r.item.name }, { label: "Demand", get: r => r.demand },
+                { label: "Received", get: r => r.received }, { label: "Ending", get: r => r.ending ?? "" },
+                { label: "Used", get: r => r.used ?? "" },
+              ]))}
+            >
+              <div className="mb-3">
+                <select className="w-full bg-white border-2 border-[#D8D2C2] rounded-xl px-3 py-2.5 text-sm font-medium" value={muBranch} onChange={e => setMuBranch(e.target.value)}>
+                  {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+              <table className="w-full text-sm">
+                <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Demand</th><th className="text-right py-1.5">Received</th><th className="text-right py-1.5">Ending</th><th className="text-right py-1.5 font-bold">Used</th></tr></thead>
+                <tbody>
+                  {rowsData.map(r => (
+                    <tr key={r.item.id} className="border-t border-[#EFEBDF]">
+                      <td className="py-2 font-medium">{r.item.name}{r.item.nameUr && <span className="text-[#8A9690]"> — {r.item.nameUr}</span>}</td>
+                      <td className="text-right py-2 font-mono">{r.demand}</td>
+                      <td className="text-right py-2 font-mono">{r.received}</td>
+                      <td className="text-right py-2 font-mono">{r.ending ?? "–"}</td>
+                      <td className="text-right py-2 font-mono font-bold">{r.used !== null ? r.used : "–"}</td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <div className="text-[11px] text-[#8A9690] mt-3">Used = Opening (yesterday's ending) + Received − Ending. Set a date above to check a different day.</div>
-          </ReportTable>
-        )}
+                  ))}
+                  {rowsData.length === 0 && <tr><td colSpan={5} className="py-3 text-[#8A9690]">No entries.</td></tr>}
+                </tbody>
+              </table>
+              <div className="text-[11px] text-[#8A9690] mt-3">Used = Opening (yesterday's ending) + Received − Ending. Opening isn't tracked per-kitchen, so it's blank when a single kitchen is selected.</div>
+            </ReportTable>
+          );
+        })()}
         {tab === "Purchases" && (
           <ReportTable title="Purchase History" onExport={() => downloadCSV("purchases.csv", toCSV(db.purchases, [{ label: "Date", get: p => p.date }, { label: "Item", get: p => itemName(p.itemId) }, { label: "Supplier", get: p => supplierName(p.supplierId) }, { label: "Qty", get: p => p.qty }, { label: "Rate", get: p => p.rate }, { label: "Amount", get: p => p.amount }, { label: "Payment", get: p => p.paymentMode || "credit" }]))}>
             {db.purchases.filter(p => itemName(p.itemId).toLowerCase().includes(q.toLowerCase()) && (!dateFilter || p.date === dateFilter)).slice(0, 200).map(p => (
@@ -1077,92 +1093,114 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             </table>
           </ReportTable>
         )}
-        {tab === "Kitchens" && (() => {
+        {tab === "Demand" && (() => {
           const eff = dateFilter || todayStr();
           const kBranches = myBranches.filter(b => kitchensOf(db, b).length > 0);
           const isAdmin = (session.permissions || []).includes("admin");
           const branchSum = (arr, branch, itemId) => arr.filter(r => r.itemId === itemId && r.date === eff && r.branch === branch).reduce((a, r) => a + r.qty, 0);
           const adjFor = (itemId) => (db.demandAdjustments || []).filter(a => a.itemId === itemId && a.date === eff).reduce((a, x) => a + x.qty, 0);
-
           const voidedInfo = (itemId) => (db.voidedDemandItems || []).filter(v => v.itemId === itemId && v.date === eff);
 
-          const section = (title, arr, showAdjust) => {
-            const rowsData = filteredItems.map(i => {
-              const cols = kBranches.map(b => branchSum(arr, b, i.id));
-              const total = cols.reduce((a, v) => a + v, 0);
-              const adj = showAdjust ? adjFor(i.id) : 0;
-              const voided = showAdjust ? voidedInfo(i.id) : [];
-              return { item: i, cols, total, adj, final: total + adj, voided };
-            }).filter(r => r.total !== 0 || r.adj !== 0);
+          const rowsData = filteredItems.map(i => {
+            const cols = kBranches.map(b => branchSum(db.demands, b, i.id));
+            const total = cols.reduce((a, v) => a + v, 0);
+            const adj = adjFor(i.id);
+            return { item: i, cols, total, adj, final: total + adj, voided: voidedInfo(i.id) };
+          }).filter(r => r.total !== 0 || r.adj !== 0);
 
+          return (
+            <ReportTable
+              title={`Demand — ${eff}`}
+              onExport={() => downloadCSV("demand.csv", toCSV(rowsData, [
+                { label: "Item", get: r => r.item.name },
+                ...kBranches.map((b, idx) => ({ label: b, get: r => r.cols[idx] })),
+                { label: "Total", get: r => r.total }, { label: "Adjust", get: r => r.adj }, { label: "Final", get: r => r.final },
+              ]))}
+            >
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-[#7A8880]">
+                    <th className="py-1.5">Item</th>
+                    {kBranches.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}
+                    <th className="text-right py-1.5">Total</th>
+                    <th className="text-right py-1.5">Final</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rowsData.map(r => (
+                    <React.Fragment key={r.item.id}>
+                      <tr className={`border-t border-[#EFEBDF] ${r.voided.length > 0 ? "bg-[#FBEAEA]" : ""}`}>
+                        <td className="py-2 font-medium">{r.item.name}{r.item.nameUr && <span className="text-[#8A9690]"> — {r.item.nameUr}</span>}</td>
+                        {r.cols.map((v, idx) => <td key={idx} className="text-right py-2 font-mono">{v}</td>)}
+                        <td className="text-right py-2 font-mono">{r.total}</td>
+                        <td className="text-right py-2 font-mono font-bold">
+                          {r.final}
+                          {isAdmin && <button onClick={() => setAdjOpenBranch(adjOpenBranch === r.item.id ? null : r.item.id)} className="ml-1.5 text-[10px] text-[#4A6FA5] font-semibold align-middle">✎</button>}
+                        </td>
+                      </tr>
+                      {r.voided.length > 0 && (
+                        <tr><td colSpan={kBranches.length + 3} className="text-[11px] text-[#B33A3A] font-semibold pb-1">voided for {r.voided.map(v => supplierName(v.supplierId)).join(", ")}</td></tr>
+                      )}
+                      {adjOpenBranch === r.item.id && (
+                        <tr><td colSpan={kBranches.length + 3} className="pb-2">
+                          <div className="flex gap-2 mt-1">
+                            <input className={numCls} type="number" placeholder="+/- qty" value={adjQty} onChange={e => setAdjQty(e.target.value)} />
+                            <input className={numCls + " font-sans"} placeholder="Reason" value={adjReason} onChange={e => setAdjReason(e.target.value)} />
+                            <button onClick={() => saveDemandAdjustment(r.item.id)} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Save</button>
+                          </div>
+                        </td></tr>
+                      )}
+                    </React.Fragment>
+                  ))}
+                  {rowsData.length === 0 && <tr><td colSpan={kBranches.length + 3} className="py-3 text-[#8A9690]">No entries.</td></tr>}
+                </tbody>
+              </table>
+            </ReportTable>
+          );
+        })()}
+        {tab === "Kitchens" && (() => {
+          const eff = dateFilter || todayStr();
+          const allKitchens = myBranches.flatMap(b => kitchensOf(db, b)).sort((a, b) => (a.branch === b.branch ? 0 : a.branch < b.branch ? -1 : 1));
+          const kSum = (arr, kitchenId, itemId) => arr.filter(r => r.itemId === itemId && r.date === eff && r.kitchenId === kitchenId).reduce((a, r) => a + r.qty, 0);
+
+          const section = (title, arr) => {
+            const rowsData = filteredItems.map(i => ({ item: i, cols: allKitchens.map(k => kSum(arr, k.id, i.id)) })).filter(r => r.cols.some(v => v !== 0));
             return (
               <ReportTable
                 title={`${title} — ${eff}`}
-                onExport={() => downloadCSV(`${title.toLowerCase()}-kitchens.csv`, toCSV(rowsData, [
+                onExport={() => downloadCSV(`${title.toLowerCase()}-by-kitchen.csv`, toCSV(rowsData, [
                   { label: "Item", get: r => r.item.name },
-                  ...kBranches.map((b, idx) => ({ label: b, get: r => r.cols[idx] })),
-                  { label: "Total", get: r => r.total },
-                  ...(showAdjust ? [{ label: "Adjust", get: r => r.adj }, { label: "Final", get: r => r.final }] : []),
+                  ...allKitchens.map((k, idx) => ({ label: `${k.name} (${k.branch})`, get: r => r.cols[idx] })),
                 ]))}
               >
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-left text-[#7A8880]">
-                      <th className="py-1.5">Item</th>
-                      {kBranches.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}
-                      <th className="text-right py-1.5">Total</th>
-                      {showAdjust && <th className="text-right py-1.5">Final</th>}
+                      <th className="py-1.5 sticky left-0 bg-white">Item</th>
+                      {allKitchens.map(k => <th key={k.id} className="text-right py-1.5 px-2 whitespace-nowrap">{k.name}<br /><span className="font-normal text-[10px]">({k.branch})</span></th>)}
                     </tr>
                   </thead>
                   <tbody>
                     {rowsData.map(r => (
-                      <React.Fragment key={r.item.id}>
-                        <tr className={`border-t border-[#EFEBDF] ${r.voided.length > 0 ? "bg-[#FBEAEA]" : ""}`}>
-                          <td className="py-2 font-medium">{r.item.name}{r.item.nameUr && <span className="text-[#8A9690]"> — {r.item.nameUr}</span>}</td>
-                          {r.cols.map((v, idx) => <td key={idx} className="text-right py-2 font-mono">{v}</td>)}
-                          <td className="text-right py-2 font-mono">{r.total}</td>
-                          {showAdjust && (
-                            <td className="text-right py-2 font-mono font-bold">
-                              {r.final}
-                              {isAdmin && (
-                                <button onClick={() => setAdjOpenBranch(adjOpenBranch === r.item.id ? null : r.item.id)} className="ml-1.5 text-[10px] text-[#4A6FA5] font-semibold align-middle">✎</button>
-                              )}
-                            </td>
-                          )}
-                        </tr>
-                        {r.voided.length > 0 && (
-                          <tr><td colSpan={kBranches.length + 3} className="text-[11px] text-[#B33A3A] font-semibold pb-1">
-                            voided for {r.voided.map(v => supplierName(v.supplierId)).join(", ")}
-                          </td></tr>
-                        )}
-                        {showAdjust && r.adj !== 0 && (
-                          <tr><td colSpan={kBranches.length + 3} className="text-[11px] text-[#B3562C] pb-1">adjusted {r.adj > 0 ? "+" : ""}{r.adj}</td></tr>
-                        )}
-                        {showAdjust && adjOpenBranch === r.item.id && (
-                          <tr><td colSpan={kBranches.length + 3} className="pb-2">
-                            <div className="flex gap-2 mt-1">
-                              <input className={numCls} type="number" placeholder="+/- qty" value={adjQty} onChange={e => setAdjQty(e.target.value)} />
-                              <input className={numCls + " font-sans"} placeholder="Reason" value={adjReason} onChange={e => setAdjReason(e.target.value)} />
-                              <button onClick={() => saveDemandAdjustment(r.item.id)} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Save</button>
-                            </div>
-                          </td></tr>
-                        )}
-                      </React.Fragment>
+                      <tr key={r.item.id} className="border-t border-[#EFEBDF]">
+                        <td className="py-2 font-medium sticky left-0 bg-white">{r.item.name}{r.item.nameUr && <span className="text-[#8A9690]"> — {r.item.nameUr}</span>}</td>
+                        {r.cols.map((v, idx) => <td key={idx} className="text-right py-2 px-2 font-mono">{v}</td>)}
+                      </tr>
                     ))}
-                    {rowsData.length === 0 && <tr><td colSpan={kBranches.length + 2} className="py-3 text-[#8A9690]">No entries.</td></tr>}
+                    {rowsData.length === 0 && <tr><td colSpan={allKitchens.length + 1} className="py-3 text-[#8A9690]">No entries.</td></tr>}
                   </tbody>
                 </table>
               </ReportTable>
             );
           };
 
+          if (allKitchens.length === 0) return <div className="text-sm text-[#8A9690]">No kitchens set up yet — add them in Admin &gt; Kitchens.</div>;
+
           return (
             <React.Fragment>
-              {section("Demand", db.demands, true)}
+              {section("Demand", db.demands)}
               <div className="mb-3" />
-              {section("Received", db.issues.filter(x => kBranches.includes(x.to)).map(x => ({ ...x, branch: x.to })), false)}
-              <div className="mb-3" />
-              {section("Ending", db.endings, false)}
+              {section("Ending", db.endings)}
             </React.Fragment>
           );
         })()}
