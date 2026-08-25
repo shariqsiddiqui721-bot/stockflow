@@ -330,7 +330,7 @@ function App() {
   return (
     <div className="min-h-screen bg-[#F4EFE4] pb-8">
       <Toast msg={toast?.msg} kind={toast?.kind} />
-      {screen === "menu" && <MainMenu db={db} session={session} onLogout={() => setSession(null)} setScreen={setScreen} />}
+      {screen === "menu" && <MainMenu db={db} session={session} persist={persist} onLogout={() => setSession(null)} setScreen={setScreen} />}
       {screen === "purchase" && <PurchaseScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "issue" && <IssueScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "ending" && <EndingScreen {...commonProps} onDone={() => setScreen("menu")} />}
@@ -387,11 +387,15 @@ function LoginScreen({ db, onLogin }) {
 
 /* ---------- Main Menu ---------- */
 
-function MainMenu({ db, session, onLogout, setScreen }) {
+function MainMenu({ db, session, persist, onLogout, setScreen }) {
   const perms = session.permissions || [];
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const pendingReceipts = (db.issues || []).filter(x => !x.confirmed && myBranches.includes(x.to)).length;
   const [pushState, setPushState] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+  const isAdmin = perms.includes("admin");
+  const mismatches = (db.adjustments || []).filter(a => a.kind === "received-mismatch" && !a.acknowledged && (isAdmin || a.senderUserId === session.id));
+  const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
+  const dismissMismatch = (id) => persist({ ...db, adjustments: db.adjustments.map(a => a.id === id ? { ...a, acknowledged: true } : a) });
   const tiles = [
     { key: "purchase", label: "Purchase", sub: "Record stock in", emoji: "📦", color: "#C98A2C" },
     { key: "issue", label: "Issue", sub: "Move to branches", emoji: "🔀", color: "#2B6E63" },
@@ -404,6 +408,20 @@ function MainMenu({ db, session, onLogout, setScreen }) {
 
   return (
     <div>
+      {mismatches.length > 0 && (
+        <div className="mx-4 mt-4 mb-1 bg-[#B33A3A] rounded-2xl p-4 shadow-lg border-2 border-[#7A2626] animate-pulse">
+          <div className="text-white font-bold mb-2 flex items-center gap-2 text-base">🔴 Receiving Mismatch{mismatches.length > 1 ? "es" : ""}</div>
+          {mismatches.map(m => (
+            <div key={m.id} className="flex justify-between items-start gap-2 py-1.5 border-t border-white/20 first:border-t-0">
+              <div className="text-white text-sm">
+                <div className="font-semibold">{itemName(m.itemId)} — {m.branch}</div>
+                <div className="text-white/80 text-xs">{m.qty > 0 ? "+" : ""}{m.qty} · {m.reason}</div>
+              </div>
+              <button onClick={() => dismissMismatch(m.id)} className="text-[10px] font-semibold bg-white/20 text-white px-2.5 py-1 rounded-full whitespace-nowrap">Dismiss</button>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="bg-[#1F2A24] text-[#F4EFE4] px-5 pt-6 pb-8 rounded-b-[28px] shadow-md">
         <div className="flex items-center justify-between">
           <div>
@@ -694,7 +712,9 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
   const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
   const [category, setCategory] = useState(db.categories[0]);
   const [values, setValues] = useState({});
-  const items = db.items.filter(i => i.category === category);
+  const activeKitchen = myKitchens.find(k => k.id === kitchenId);
+  const kitchenItemIds = activeKitchen && activeKitchen.itemIds && activeKitchen.itemIds.length ? activeKitchen.itemIds : null;
+  const items = db.items.filter(i => i.category === category && (!kitchenItemIds || kitchenItemIds.includes(i.id)));
   useEffect(() => { setValues({}); }, [category, branch, kitchenId]);
   useEffect(() => { setKitchenId(myKitchensFor(db, session, branch)[0]?.id || ""); }, [branch]);
   const entries = Object.entries(values).filter(([, v]) => v !== "" && v !== undefined);
@@ -808,7 +828,7 @@ function ConfirmReceiptScreen({ db, session, persist, addLog, flash, onDone }) {
     const diff = actual - issue.qty;
     const next = { ...db, issues: db.issues.map(x => x.id === issue.id ? { ...x, confirmed: true, confirmedQty: actual, confirmedBy: session.id, confirmedAt: nowStr() } : x) };
     if (diff !== 0) {
-      const adjRec = { id: uid("adj"), date: todayStr(), branch: issue.to, kitchenId: issue.kitchenId || null, itemId: issue.itemId, qty: diff, kind: "received-mismatch", reason: `Issued ${issue.qty}, received ${actual} (issue from ${issue.from})`, userId: session.id };
+      const adjRec = { id: uid("adj"), date: todayStr(), branch: issue.to, kitchenId: issue.kitchenId || null, itemId: issue.itemId, qty: diff, kind: "received-mismatch", reason: `Issued ${issue.qty}, received ${actual} (issue from ${issue.from})`, userId: session.id, senderUserId: issue.userId, issuedQty: issue.qty, receivedQty: actual, acknowledged: false };
       next.adjustments = [adjRec, ...(next.adjustments || [])];
     }
     addLog(next, "Receipt Mismatch", `${itemName(issue.itemId)} at ${issue.to}: issued ${issue.qty}, received ${actual}`);
@@ -863,7 +883,9 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
   const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
   const [category, setCategory] = useState(db.categories[0]);
   const [values, setValues] = useState({});
-  const items = db.items.filter(i => i.category === category);
+  const activeKitchen = myKitchens.find(k => k.id === kitchenId);
+  const kitchenItemIds = activeKitchen && activeKitchen.itemIds && activeKitchen.itemIds.length ? activeKitchen.itemIds : null;
+  const items = db.items.filter(i => i.category === category && (!kitchenItemIds || kitchenItemIds.includes(i.id)));
   useEffect(() => { setValues({}); }, [category, branch, kitchenId]);
   useEffect(() => { setKitchenId(myKitchensFor(db, session, branch)[0]?.id || ""); }, [branch]);
   const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
@@ -1537,6 +1559,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newUserNotifications, setNewUserNotifications] = useState(true);
   const [newKitchenName, setNewKitchenName] = useState("");
   const [newKitchenBranch, setNewKitchenBranch] = useState(BRANCHES.find(b => b !== "Store") || BRANCHES[0]);
+  const [newKitchenItems, setNewKitchenItems] = useState([]);
   const [editKitchenId, setEditKitchenId] = useState(null);
   const [editKitchenDraft, setEditKitchenDraft] = useState({});
   const [ratesSupplierId, setRatesSupplierId] = useState(db.suppliers[0]?.id || "");
@@ -1607,13 +1630,14 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
 
   const addKitchen = () => {
     if (!newKitchenName.trim()) return;
-    const rec = { id: uid("k"), name: newKitchenName.trim(), branch: newKitchenBranch };
+    const rec = { id: uid("k"), name: newKitchenName.trim(), branch: newKitchenBranch, itemIds: newKitchenItems };
     const next = { ...db, kitchens: [...(db.kitchens || []), rec] };
     addLog(next, "Admin", `Added kitchen ${rec.name} (${rec.branch})`);
-    persist(next); setNewKitchenName(""); flash("Kitchen added");
+    persist(next); setNewKitchenName(""); setNewKitchenItems([]); flash("Kitchen added");
   };
   const delKitchen = (id) => persist({ ...db, kitchens: (db.kitchens || []).filter(k => k.id !== id) });
-  const startEditKitchen = (k) => { setEditKitchenId(k.id); setEditKitchenDraft({ name: k.name, branch: k.branch }); };
+  const startEditKitchen = (k) => { setEditKitchenId(k.id); setEditKitchenDraft({ name: k.name, branch: k.branch, itemIds: k.itemIds || [] }); };
+  const toggleEditKitchenItem = (id) => setEditKitchenDraft(d => ({ ...d, itemIds: (d.itemIds || []).includes(id) ? d.itemIds.filter(x => x !== id) : [...(d.itemIds || []), id] }));
   const saveEditKitchen = () => {
     const next = { ...db, kitchens: (db.kitchens || []).map(k => k.id === editKitchenId ? { ...k, ...editKitchenDraft } : k) };
     addLog(next, "Admin", `Edited kitchen ${editKitchenDraft.name}`);
@@ -1770,6 +1794,12 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 <input className={numCls + " font-sans"} placeholder="Kitchen name" value={newKitchenName} onChange={e => setNewKitchenName(e.target.value)} />
                 <select className={selCls} value={newKitchenBranch} onChange={e => setNewKitchenBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select>
               </div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Items this kitchen can see (blank = all items)</div>
+              <div className="flex flex-wrap gap-1.5 mb-2 max-h-40 overflow-y-auto">
+                {db.items.map(i => (
+                  <button key={i.id} type="button" onClick={() => setNewKitchenItems(v => v.includes(i.id) ? v.filter(x => x !== i.id) : [...v, i.id])} className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${newKitchenItems.includes(i.id) ? "bg-[#8A4A4A] text-white border-[#8A4A4A]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>{i.name}</button>
+                ))}
+              </div>
               <button onClick={addKitchen} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Kitchen</button>
             </div>
             {BRANCHES.map(b => {
@@ -1785,6 +1815,12 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                           <input className={numCls + " font-sans"} value={editKitchenDraft.name} onChange={e => setEditKitchenDraft(d => ({ ...d, name: e.target.value }))} />
                           <select className={selCls} value={editKitchenDraft.branch} onChange={e => setEditKitchenDraft(d => ({ ...d, branch: e.target.value }))}>{BRANCHES.map(bb => <option key={bb}>{bb}</option>)}</select>
                         </div>
+                        <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Items this kitchen can see (blank = all items)</div>
+                        <div className="flex flex-wrap gap-1.5 mb-2 max-h-40 overflow-y-auto">
+                          {db.items.map(i => (
+                            <button key={i.id} type="button" onClick={() => toggleEditKitchenItem(i.id)} className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${(editKitchenDraft.itemIds || []).includes(i.id) ? "bg-[#8A4A4A] text-white border-[#8A4A4A]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>{i.name}</button>
+                          ))}
+                        </div>
                         <div className="flex gap-2">
                           <button onClick={saveEditKitchen} className="bg-[#2B6E63] text-white px-4 rounded-xl font-semibold">Save</button>
                           <button onClick={() => setEditKitchenId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 rounded-xl font-semibold">Cancel</button>
@@ -1792,7 +1828,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                       </div>
                     ) : (
                       <div key={k.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
-                        <span className="text-sm"><b>{k.name}</b></span>
+                        <span className="text-sm"><b>{k.name}</b> <span className="text-[#8A9690]">· {(k.itemIds && k.itemIds.length) ? k.itemIds.length + " item(s)" : "all items"}</span></span>
                         <div className="flex items-center gap-3">
                           <button onClick={() => startEditKitchen(k)} className="text-[#5C6B62]">✎</button>
                           <button onClick={() => delKitchen(k.id)} className="text-[#B33A3A]">✕</button>
