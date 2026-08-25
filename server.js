@@ -206,6 +206,7 @@ const SEED = {
   payments: [],
   adjustments: [],
   demandAdjustments: [],
+  voidedDemandItems: [],
   log: [],
 };
 
