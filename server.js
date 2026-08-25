@@ -1,6 +1,11 @@
 const express = require("express");
 const path = require("path");
 const { Pool } = require("pg");
+const webpush = require("web-push");
+
+const VAPID_PUBLIC_KEY = "BH5Tvcl3ie8t3JLf1bCGaRD7keOkjdGZ8v94HblObxmY-Mjbjq1Vfo-VQRisWmMpSgffKPJg6zHPoVeUJ_Cp7fU";
+const VAPID_PRIVATE_KEY = "DrPMA70J0WU9pPipHSNa9zkk0ZFqU75RP4k31aLVGEg";
+webpush.setVapidDetails("mailto:admin@stockflow.local", VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
@@ -195,9 +200,9 @@ const SEED = {
     { id: "k8", name: "Kitchen 4", branch: "North" },
   ],
   users: [
-    { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "ending", "demand", "adjustment", "payment", "reports", "admin"], branches: ["Store", "FB", "North"], kitchens: [] },
-    { id: "u2", name: "Ahmed", pin: "2233", permissions: ["purchase", "issue", "reports"], branches: ["Store"], kitchens: [] },
-    { id: "u3", name: "Bilal", pin: "3344", permissions: ["ending", "demand"], branches: ["FB", "North"], kitchens: [] },
+    { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "receive", "ending", "demand", "adjustment", "payment", "reports", "admin"], branches: ["Store", "FB", "North"], kitchens: [], notifications: true },
+    { id: "u2", name: "Ahmed", pin: "2233", permissions: ["purchase", "issue", "receive", "reports"], branches: ["Store"], kitchens: [], notifications: true },
+    { id: "u3", name: "Bilal", pin: "3344", permissions: ["ending", "demand", "receive"], branches: ["FB", "North"], kitchens: [], notifications: true },
   ],
   purchases: [],
   issues: [],
@@ -207,6 +212,7 @@ const SEED = {
   adjustments: [],
   demandAdjustments: [],
   voidedDemandItems: [],
+  pushSubscriptions: {},
   log: [],
 };
 
@@ -247,6 +253,78 @@ app.post("/api/state", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to save data" });
+  }
+});
+
+// VAPID public key, needed by the browser to create a push subscription.
+app.get("/api/push/vapid-public-key", (req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY }));
+
+// Store a push subscription for a user (a user may have several devices).
+app.post("/api/push/subscribe", async (req, res) => {
+  try {
+    const { userId, subscription } = req.body;
+    if (!userId || !subscription) return res.status(400).json({ error: "userId and subscription required" });
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    data.pushSubscriptions = data.pushSubscriptions || {};
+    const list = data.pushSubscriptions[userId] || [];
+    const exists = list.some(s => s.endpoint === subscription.endpoint);
+    data.pushSubscriptions[userId] = exists ? list : [...list, subscription];
+    await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to subscribe" });
+  }
+});
+
+// Remove a push subscription (device unsubscribed or permission revoked).
+app.post("/api/push/unsubscribe", async (req, res) => {
+  try {
+    const { userId, endpoint } = req.body;
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    if (data.pushSubscriptions && data.pushSubscriptions[userId]) {
+      data.pushSubscriptions[userId] = data.pushSubscriptions[userId].filter(s => s.endpoint !== endpoint);
+    }
+    await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to unsubscribe" });
+  }
+});
+
+// Send a push notification to one or more users' registered devices.
+app.post("/api/push/send", async (req, res) => {
+  try {
+    const { userIds, title, body, url } = req.body;
+    if (!Array.isArray(userIds) || !title) return res.status(400).json({ error: "userIds and title required" });
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    data.pushSubscriptions = data.pushSubscriptions || {};
+    const payload = JSON.stringify({ title, body: body || "", url: url || "/" });
+    let changed = false;
+    for (const userId of userIds) {
+      const subs = data.pushSubscriptions[userId] || [];
+      const survivors = [];
+      for (const sub of subs) {
+        try {
+          await webpush.sendNotification(sub, payload);
+          survivors.push(sub);
+        } catch (err) {
+          // 404/410 = the subscription is gone (uninstalled, permission revoked, etc.) — drop it.
+          if (err.statusCode !== 404 && err.statusCode !== 410) survivors.push(sub);
+          else changed = true;
+        }
+      }
+      data.pushSubscriptions[userId] = survivors;
+    }
+    if (changed) await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to send notifications" });
   }
 });
 
