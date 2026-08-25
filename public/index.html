@@ -22,7 +22,7 @@
 const { useState, useEffect, useMemo, useCallback } = React;
 
 const BRANCHES = ["Store", "FB", "North"];
-const ALL_PERMISSIONS = ["purchase", "issue", "ending", "demand", "adjustment", "payment", "reports", "admin"];
+const ALL_PERMISSIONS = ["purchase", "issue", "receive", "ending", "demand", "adjustment", "payment", "reports", "admin"];
 const uid = (p) => p + Math.random().toString(36).slice(2, 9);
 // Business day runs 9:00 AM to 6:00 AM the next calendar day.
 // Anything before 9 AM still counts as "yesterday's" business date.
@@ -34,6 +34,90 @@ const todayStr = () => {
 };
 const nowStr = () => new Date().toLocaleString();
 const money = (n) => "Rs " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+// Demand runs on its own window: 9:00 PM through 6:00 PM the following calendar day.
+// e.g. "15 Aug demand" = everything entered from 14 Aug 9pm through 15 Aug 6pm.
+const demandDateStr = (ts) => {
+  const d = new Date(ts || Date.now());
+  const bucket = new Date(d);
+  if (d.getHours() >= 21) bucket.setDate(bucket.getDate() + 1);
+  return `${bucket.getFullYear()}-${pad2(bucket.getMonth() + 1)}-${pad2(bucket.getDate())}`;
+};
+const demandWindowOf = (dateStr) => {
+  const [y, m, dd] = dateStr.split("-").map(Number);
+  const end = new Date(y, m - 1, dd, 18, 0, 0, 0).getTime();
+  const start = new Date(y, m - 1, dd - 1, 21, 0, 0, 0).getTime();
+  return { start, end };
+};
+// Fallback timestamp for records saved before "ts" existed — noon of their own date bucket.
+const tsOf = (r) => r.ts || new Date(r.date + "T12:00:00").getTime();
+
+// Splits an item's demand for one branch/kitchen on one demand-date into:
+// - firstDemand: everything asked for before the first issue that day (a historical snapshot)
+// - currentDemand: everything asked for since the LAST issue that day (what's still outstanding)
+// Multiple same-day demand entries add together until an issue resets the cycle.
+function demandCycle(db, itemId, branch, kitchenId, dateStr) {
+  const { start, end } = demandWindowOf(dateStr);
+  const inWindow = (r) => { const t = tsOf(r); return t >= start && t < end; };
+  const demandEntries = db.demands
+    .filter(d => d.itemId === itemId && d.branch === branch && (kitchenId ? d.kitchenId === kitchenId : true) && inWindow(d))
+    .sort((a, b) => tsOf(a) - tsOf(b));
+  const issueEntries = db.issues
+    .filter(x => x.itemId === itemId && x.to === branch && (kitchenId ? x.kitchenId === kitchenId : true) && inWindow(x))
+    .sort((a, b) => tsOf(a) - tsOf(b));
+  const firstIssueTs = issueEntries.length ? tsOf(issueEntries[0]) : null;
+  const lastIssueTs = issueEntries.length ? tsOf(issueEntries[issueEntries.length - 1]) : null;
+  const firstDemand = demandEntries.filter(d => firstIssueTs === null || tsOf(d) <= firstIssueTs).reduce((a, d) => a + d.qty, 0);
+  const currentDemand = demandEntries.filter(d => lastIssueTs === null || tsOf(d) > lastIssueTs).reduce((a, d) => a + d.qty, 0);
+  return { firstDemand, currentDemand, wasIssued: issueEntries.length > 0 };
+}
+
+/* ---------- Push notifications ---------- */
+
+const VAPID_PUBLIC_KEY = "BH5Tvcl3ie8t3JLf1bCGaRD7keOkjdGZ8v94HblObxmY-Mjbjq1Vfo-VQRisWmMpSgffKPJg6zHPoVeUJ_Cp7fU";
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const arr = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) arr[i] = rawData.charCodeAt(i);
+  return arr;
+}
+
+// Requests permission and registers this device for push, tied to the given user id.
+// Must be called from a user gesture (button tap) — browsers block silent permission prompts.
+async function enablePush(userId) {
+  try {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return false;
+    const reg = await navigator.serviceWorker.ready;
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") return false;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+    }
+    await fetch("/api/push/subscribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId, subscription: sub }) });
+    return true;
+  } catch (e) { return false; }
+}
+
+// Fire-and-forget: ask the server to push a notification to these users' devices.
+function notifyUsers(userIds, title, body, url) {
+  const ids = [...new Set((userIds || []).filter(Boolean))];
+  if (ids.length === 0) return;
+  fetch("/api/push/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userIds: ids, title, body: body || "", url: url || "/" }) }).catch(() => {});
+}
+
+const adminRecipients = (db) => db.users.filter(u => (u.permissions || []).includes("admin") && u.notifications !== false).map(u => u.id);
+const branchRecipients = (db, branch, kitchenId) => db.users.filter(u => {
+  if (u.notifications === false) return false;
+  if ((u.permissions || []).includes("admin")) return true;
+  const myBr = u.branches || [];
+  if (myBr.length > 0 && !myBr.includes(branch)) return false;
+  if (kitchenId && u.kitchens && u.kitchens.length > 0 && !u.kitchens.includes(kitchenId)) return false;
+  return true;
+}).map(u => u.id);
 
 async function apiGet() {
   const r = await fetch("/api/state");
@@ -246,12 +330,13 @@ function App() {
   return (
     <div className="min-h-screen bg-[#F4EFE4] pb-8">
       <Toast msg={toast?.msg} kind={toast?.kind} />
-      {screen === "menu" && <MainMenu session={session} onLogout={() => setSession(null)} setScreen={setScreen} />}
+      {screen === "menu" && <MainMenu db={db} session={session} onLogout={() => setSession(null)} setScreen={setScreen} />}
       {screen === "purchase" && <PurchaseScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "issue" && <IssueScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "ending" && <EndingScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "demand" && <DemandScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "adjustment" && <AdjustmentScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "receive" && <ConfirmReceiptScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "payment" && <PaymentScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "reports" && <ReportsScreen {...commonProps} onBack={() => setScreen("menu")} />}
       {screen === "admin" && <AdminScreen {...commonProps} onBack={() => setScreen("menu")} />}
@@ -302,11 +387,15 @@ function LoginScreen({ db, onLogin }) {
 
 /* ---------- Main Menu ---------- */
 
-function MainMenu({ session, onLogout, setScreen }) {
+function MainMenu({ db, session, onLogout, setScreen }) {
   const perms = session.permissions || [];
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const pendingReceipts = (db.issues || []).filter(x => !x.confirmed && myBranches.includes(x.to)).length;
+  const [pushState, setPushState] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
   const tiles = [
     { key: "purchase", label: "Purchase", sub: "Record stock in", emoji: "📦", color: "#C98A2C" },
     { key: "issue", label: "Issue", sub: "Move to branches", emoji: "🔀", color: "#2B6E63" },
+    { key: "receive", label: "Confirm Receipt", sub: pendingReceipts > 0 ? `${pendingReceipts} pending` : "All confirmed", emoji: "📥", color: "#4A6FA5" },
     { key: "ending", label: "Ending", sub: "Closing count", emoji: "📋", color: "#4A6FA5" },
     { key: "demand", label: "Demand", sub: "Request items", emoji: "🧾", color: "#B3562C" },
     { key: "adjustment", label: "Adjustment", sub: "Wastage / theft", emoji: "⚖️", color: "#8A4A4A" },
@@ -326,6 +415,12 @@ function MainMenu({ session, onLogout, setScreen }) {
       </div>
       {tiles.length === 0 && (
         <div className="px-5 mt-6 text-center text-[#7A8880] text-sm">No options assigned to your account yet. Ask your admin.</div>
+      )}
+      {session.notifications !== false && pushState === "default" && (
+        <div className="mx-5 mt-4 bg-[#FBF0DD] border-2 border-[#C98A2C] rounded-2xl p-3.5 flex items-center justify-between gap-3">
+          <div className="text-sm text-[#7A5C2E] font-medium">Get notified when stock moves in or out of your branch.</div>
+          <button onClick={async () => { const ok = await enablePush(session.id); setPushState(ok ? "granted" : Notification.permission); }} className="bg-[#C98A2C] text-white text-xs font-semibold px-3 py-2 rounded-xl whitespace-nowrap">Enable</button>
+        </div>
       )}
       <div className="px-5 -mt-4 grid grid-cols-2 gap-4">
         {tiles.map(t => (
@@ -422,6 +517,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
     const next = { ...db, purchases: [...recs, ...db.purchases] };
     addLog(next, "Purchase", `${supplier.name}: ${recs.length} item(s), bill ${money(total)} (${payMode})`);
     persist(next);
+    notifyUsers(adminRecipients(db), "New Purchase", `${supplier.name}: ${recs.length} item(s), ${money(total)} (${payMode})`);
     flash("Bill saved — " + recs.length + " item(s)");
     setRows({});
   };
@@ -555,11 +651,13 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
     if (from === to) { flash("From and To must differ", "error"); return; }
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
     if (anyOver) { flash("Not enough stock for one or more items", "error"); return; }
-    const recs = entries.map(([itemId, v]) => ({ id: uid("iss"), date: todayStr(), from, to, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
+    const recs = entries.map(([itemId, v]) => ({ id: uid("iss"), date: todayStr(), ts: Date.now(), from, to, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
     const next = { ...db, issues: [...recs, ...db.issues] };
     const kName = toKitchens.find(k => k.id === kitchenId)?.name;
     addLog(next, "Issue", `${from} → ${to}${kName ? " (" + kName + ")" : ""}: ${entries.length} item(s)`);
-    persist(next); flash("Issue saved"); setValues({});
+    persist(next);
+    notifyUsers(branchRecipients(db, to, kitchenId), "Stock Delivered", `${entries.length} item(s) sent from ${from} to ${to}${kName ? " (" + kName + ")" : ""}`);
+    flash("Issue saved"); setValues({});
   };
 
   return (
@@ -608,7 +706,9 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
     const next = { ...db, endings: [...recs, ...db.endings] };
     const kName = myKitchens.find(k => k.id === kitchenId)?.name;
     addLog(next, "Ending", `${branch}${kName ? " — " + kName : ""}: ${entries.length} item(s)`);
-    persist(next); flash("Ending saved"); setValues({});
+    persist(next);
+    notifyUsers(adminRecipients(db), "Ending Recorded", `${branch}${kName ? " — " + kName : ""}: ${entries.length} item(s)`);
+    flash("Ending saved"); setValues({});
   };
 
   return (
@@ -655,7 +755,9 @@ function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone
     }));
     const next = { ...db, adjustments: [...recs, ...(db.adjustments || [])] };
     addLog(next, "Adjustment", `${branch}: ${entries.length} item(s) — ${kind}${reason ? " (" + reason + ")" : ""}`);
-    persist(next); flash("Adjustment saved"); setValues({}); setReason("");
+    persist(next);
+    notifyUsers(adminRecipients(db), "Stock Adjustment", `${branch}: ${entries.length} item(s) — ${kind}${reason ? " (" + reason + ")" : ""}`);
+    flash("Adjustment saved"); setValues({}); setReason("");
   };
 
   return (
@@ -684,6 +786,74 @@ function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone
   );
 }
 
+/* ---------- Confirm Receipt ---------- */
+
+function ConfirmReceiptScreen({ db, session, persist, addLog, flash, onDone }) {
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
+  const kitchenName = (id) => (db.kitchens || []).find(k => k.id === id)?.name;
+  const pending = db.issues.filter(x => !x.confirmed && myBranches.includes(x.to)).sort((a, b) => tsOf(b) - tsOf(a));
+  const [openId, setOpenId] = useState(null);
+  const [adjustQty, setAdjustQty] = useState("");
+
+  const confirmOk = (issue) => {
+    const next = { ...db, issues: db.issues.map(x => x.id === issue.id ? { ...x, confirmed: true, confirmedQty: x.qty, confirmedBy: session.id, confirmedAt: nowStr() } : x) };
+    addLog(next, "Receipt Confirmed", `${itemName(issue.itemId)} at ${issue.to}${kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""}: matches, ${issue.qty}`);
+    persist(next); flash("Confirmed");
+  };
+
+  const confirmMismatch = (issue) => {
+    const actual = Number(adjustQty);
+    if (adjustQty === "" || isNaN(actual)) { flash("Enter the quantity you actually received", "error"); return; }
+    const diff = actual - issue.qty;
+    const next = { ...db, issues: db.issues.map(x => x.id === issue.id ? { ...x, confirmed: true, confirmedQty: actual, confirmedBy: session.id, confirmedAt: nowStr() } : x) };
+    if (diff !== 0) {
+      const adjRec = { id: uid("adj"), date: todayStr(), branch: issue.to, kitchenId: issue.kitchenId || null, itemId: issue.itemId, qty: diff, kind: "received-mismatch", reason: `Issued ${issue.qty}, received ${actual} (issue from ${issue.from})`, userId: session.id };
+      next.adjustments = [adjRec, ...(next.adjustments || [])];
+    }
+    addLog(next, "Receipt Mismatch", `${itemName(issue.itemId)} at ${issue.to}: issued ${issue.qty}, received ${actual}`);
+    persist(next);
+    notifyUsers(
+      [...adminRecipients(db), issue.userId],
+      "Receipt mismatch",
+      `${itemName(issue.itemId)}: issued ${issue.qty}, received ${actual} at ${issue.to}${kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""} — reported by ${session.name}`
+    );
+    setOpenId(null); setAdjustQty(""); flash("Mismatch recorded and reported");
+  };
+
+  return (
+    <div>
+      <TopBar title="Confirm Receipt" onBack={onDone} />
+      <div className="p-5">
+        {pending.length === 0 && <div className="text-sm text-[#8A9690]">Nothing waiting on confirmation.</div>}
+        {pending.map(issue => (
+          <div key={issue.id} className="bg-white rounded-xl p-3.5 border-2 border-[#EAE4D4] mb-3">
+            <div className="flex justify-between items-start mb-2">
+              <div>
+                <div className="font-semibold text-[#1F2A24]">{itemName(issue.itemId)}</div>
+                <div className="text-[11px] text-[#8A9690]">from {issue.from} → {issue.to}{kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""} · {issue.date}</div>
+              </div>
+              <div className="font-mono font-bold text-lg">{issue.qty}</div>
+            </div>
+            {openId !== issue.id ? (
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => confirmOk(issue)} className="bg-[#2B6E63] text-white py-2.5 rounded-xl font-semibold text-sm">✓ Received OK</button>
+                <button onClick={() => { setOpenId(issue.id); setAdjustQty(""); }} className="bg-[#B33A3A] text-white py-2.5 rounded-xl font-semibold text-sm">✗ Different Amount</button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <input className={numCls} type="number" inputMode="decimal" placeholder="Actual qty received" value={adjustQty} onChange={e => setAdjustQty(e.target.value)} />
+                <button onClick={() => confirmMismatch(issue)} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Save</button>
+                <button onClick={() => setOpenId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-3 rounded-xl font-semibold">Cancel</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Demand ---------- */
 
 function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
@@ -701,11 +871,13 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
   const save = () => {
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
     if (myKitchens.length > 0 && !kitchenId) { flash("Select a kitchen", "error"); return; }
-    const recs = entries.map(([itemId, v]) => ({ id: uid("dem"), date: todayStr(), branch, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
+    const recs = entries.map(([itemId, v]) => ({ id: uid("dem"), date: demandDateStr(), ts: Date.now(), branch, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
     const next = { ...db, demands: [...recs, ...db.demands] };
     const kName = myKitchens.find(k => k.id === kitchenId)?.name;
     addLog(next, "Demand", `${branch}${kName ? " — " + kName : ""}: ${entries.length} item(s)`);
-    persist(next); flash("Demand saved"); setValues({});
+    persist(next);
+    notifyUsers(adminRecipients(db), "New Demand", `${branch}${kName ? " — " + kName : ""}: ${entries.length} item(s)`);
+    flash("Demand saved"); setValues({});
   };
 
   return (
@@ -745,7 +917,9 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
     const rec = { id: uid("pay"), date: todayStr(), supplierId, amount: Number(amount), note, userId: session.id };
     const next = { ...db, payments: [rec, ...(db.payments || [])] };
     addLog(next, "Payment", `Paid ${amount} to ${supplier?.name}`);
-    persist(next); flash("Payment saved"); setAmount(""); setNote("");
+    persist(next);
+    notifyUsers(adminRecipients(db), "Payment Made", `${money(amount)} paid to ${supplier?.name}`);
+    flash("Payment saved"); setAmount(""); setNote("");
   };
 
   return (
@@ -800,6 +974,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   const [muBranch, setMuBranch] = useState(myBranches[0]);
   const [khItemId, setKhItemId] = useState("");
   const [adjOpenBranch, setAdjOpenBranch] = useState(null);
+  const [demandMode, setDemandMode] = useState("current"); // "current" (after last issue) or "first" (before any issue)
   const [adjQty, setAdjQty] = useState("");
   const [adjReason, setAdjReason] = useState("");
   const [ledgerSupplierId, setLedgerSupplierId] = useState(db.suppliers[0]?.id || "");
@@ -878,6 +1053,12 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
         {dateFilter && (
           <button onClick={() => setDateFilter("")} className="text-xs font-semibold text-[#5C6B62] bg-[#F0ECE0] px-3 rounded-xl">All dates</button>
         )}
+        {(tab === "Demand" || tab === "Kitchens" || tab === "Supplier Demand" || tab === "Material Used") && (
+          <div className="flex gap-1 bg-[#EAE4D4] rounded-xl p-1">
+            <button onClick={() => setDemandMode("current")} className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold ${demandMode === "current" ? "bg-[#1F2A24] text-white" : "text-[#5C6B62]"}`}>After Issue</button>
+            <button onClick={() => setDemandMode("first")} className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold ${demandMode === "first" ? "bg-[#1F2A24] text-white" : "text-[#5C6B62]"}`}>1st Demand</button>
+          </div>
+        )}
       </div>
       <div className="px-4 pb-8">
         {tab === "Stock Balance" && (
@@ -898,6 +1079,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
         )}
         {tab === "Material Used" && (() => {
           const eff = dateFilter || todayStr();
+          const demEff = dateFilter || demandDateStr();
           // Build the selector list: Store (no kitchens) as a plain branch entry;
           // branches with kitchens get an "All kitchens" combined entry plus one per kitchen.
           const options = [];
@@ -909,8 +1091,11 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
           });
           const current = options.find(o => o.value === muBranch) || options[0];
           const branch = current?.branch, kitchenId = current?.kitchenId;
+          const mode = demandMode === "first" ? "firstDemand" : "currentDemand";
 
-          const demandOf = (itemId) => db.demands.filter(d => d.itemId === itemId && d.date === eff && d.branch === branch && (kitchenId ? d.kitchenId === kitchenId : true)).reduce((a, d) => a + d.qty, 0);
+          const demandOf = (itemId) => kitchenId
+            ? demandCycle(db, itemId, branch, kitchenId, demEff)[mode]
+            : demandCycle(db, itemId, branch, null, demEff)[mode] + kitchensOf(db, branch).reduce((a, k) => a + demandCycle(db, itemId, branch, k.id, demEff)[mode], 0);
           const receivedOf = (itemId) => db.issues.filter(x => x.itemId === itemId && x.date === eff && x.to === branch && (kitchenId ? x.kitchenId === kitchenId : true)).reduce((a, x) => a + x.qty, 0) + (!kitchenId && branch === "Store" ? db.purchases.filter(p => p.itemId === itemId && p.date === eff).reduce((a, p) => a + p.qty, 0) : 0);
           const endingOf = (itemId) => db.endings.find(x => x.itemId === itemId && x.date === eff && x.branch === branch && (kitchenId ? x.kitchenId === kitchenId : true));
 
@@ -1094,23 +1279,24 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
           </ReportTable>
         )}
         {tab === "Demand" && (() => {
-          const eff = dateFilter || todayStr();
+          const eff = dateFilter || demandDateStr();
           const kBranches = myBranches.filter(b => kitchensOf(db, b).length > 0);
           const isAdmin = (session.permissions || []).includes("admin");
-          const branchSum = (arr, branch, itemId) => arr.filter(r => r.itemId === itemId && r.date === eff && r.branch === branch).reduce((a, r) => a + r.qty, 0);
+          const branchSum = (branch, itemId) => demandCycle(db, itemId, branch, null, eff)[demandMode === "first" ? "firstDemand" : "currentDemand"]
+            + kitchensOf(db, branch).reduce((a, k) => a + demandCycle(db, itemId, branch, k.id, eff)[demandMode === "first" ? "firstDemand" : "currentDemand"], 0);
           const adjFor = (itemId) => (db.demandAdjustments || []).filter(a => a.itemId === itemId && a.date === eff).reduce((a, x) => a + x.qty, 0);
           const voidedInfo = (itemId) => (db.voidedDemandItems || []).filter(v => v.itemId === itemId && v.date === eff);
 
           const rowsData = filteredItems.map(i => {
-            const cols = kBranches.map(b => branchSum(db.demands, b, i.id));
+            const cols = kBranches.map(b => branchSum(b, i.id));
             const total = cols.reduce((a, v) => a + v, 0);
-            const adj = adjFor(i.id);
+            const adj = demandMode === "current" ? adjFor(i.id) : 0;
             return { item: i, cols, total, adj, final: total + adj, voided: voidedInfo(i.id) };
           }).filter(r => r.total !== 0 || r.adj !== 0);
 
           return (
             <ReportTable
-              title={`Demand — ${eff}`}
+              title={`Demand — ${eff} (${demandMode === "first" ? "1st demand" : "after issue"})`}
               onExport={() => downloadCSV("demand.csv", toCSV(rowsData, [
                 { label: "Item", get: r => r.item.name },
                 ...kBranches.map((b, idx) => ({ label: b, get: r => r.cols[idx] })),
@@ -1159,15 +1345,16 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
           );
         })()}
         {tab === "Kitchens" && (() => {
-          const eff = dateFilter || todayStr();
+          const eff = dateFilter || demandDateStr();
           const allKitchens = myBranches.flatMap(b => kitchensOf(db, b)).sort((a, b) => (a.branch === b.branch ? 0 : a.branch < b.branch ? -1 : 1));
           const kSum = (arr, kitchenId, itemId) => arr.filter(r => r.itemId === itemId && r.date === eff && r.kitchenId === kitchenId).reduce((a, r) => a + r.qty, 0);
+          const kDemand = (kitchen, itemId) => demandCycle(db, itemId, kitchen.branch, kitchen.id, eff)[demandMode === "first" ? "firstDemand" : "currentDemand"];
 
-          const section = (title, arr) => {
-            const rowsData = filteredItems.map(i => ({ item: i, cols: allKitchens.map(k => kSum(arr, k.id, i.id)) })).filter(r => r.cols.some(v => v !== 0));
+          const section = (title, arr, useCycle) => {
+            const rowsData = filteredItems.map(i => ({ item: i, cols: allKitchens.map(k => useCycle ? kDemand(k, i.id) : kSum(arr, k.id, i.id)) })).filter(r => r.cols.some(v => v !== 0));
             return (
               <ReportTable
-                title={`${title} — ${eff}`}
+                title={`${title} — ${eff}${useCycle ? (demandMode === "first" ? " (1st demand)" : " (after issue)") : ""}`}
                 onExport={() => downloadCSV(`${title.toLowerCase()}-by-kitchen.csv`, toCSV(rowsData, [
                   { label: "Item", get: r => r.item.name },
                   ...allKitchens.map((k, idx) => ({ label: `${k.name} (${k.branch})`, get: r => r.cols[idx] })),
@@ -1198,18 +1385,22 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
 
           return (
             <React.Fragment>
-              {section("Demand", db.demands)}
+              {section("Demand", db.demands, true)}
               <div className="mb-3" />
-              {section("Ending", db.endings)}
+              {section("Ending", db.endings, false)}
             </React.Fragment>
           );
         })()}
         {tab === "Supplier Demand" && (() => {
-          const eff = dateFilter || todayStr();
+          const eff = dateFilter || demandDateStr();
           const supplier = db.suppliers.find(s => s.id === ledgerSupplierId);
           const finalDemandOf = (itemId) => {
-            const raw = db.demands.filter(d => d.itemId === itemId && d.date === eff).reduce((a, d) => a + d.qty, 0);
-            const adj = (db.demandAdjustments || []).filter(a => a.itemId === itemId && a.date === eff).reduce((a, x) => a + x.qty, 0);
+            const raw = myBranches.reduce((sum, b) => {
+              const branchTotal = demandCycle(db, itemId, b, null, eff)[demandMode === "first" ? "firstDemand" : "currentDemand"];
+              const kitchenTotal = kitchensOf(db, b).reduce((a, k) => a + demandCycle(db, itemId, b, k.id, eff)[demandMode === "first" ? "firstDemand" : "currentDemand"], 0);
+              return sum + branchTotal + kitchenTotal;
+            }, 0);
+            const adj = demandMode === "current" ? (db.demandAdjustments || []).filter(a => a.itemId === itemId && a.date === eff).reduce((a, x) => a + x.qty, 0) : 0;
             return raw + adj;
           };
           const supplierItems = supplier ? db.items.filter(i => supplier.itemIds.includes(i.id)) : [];
@@ -1343,6 +1534,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newUserBranches, setNewUserBranches] = useState([...BRANCHES]);
   const [newUserReportTabs, setNewUserReportTabs] = useState([...REPORT_TABS]);
   const [newUserKitchens, setNewUserKitchens] = useState([]);
+  const [newUserNotifications, setNewUserNotifications] = useState(true);
   const [newKitchenName, setNewKitchenName] = useState("");
   const [newKitchenBranch, setNewKitchenBranch] = useState(BRANCHES.find(b => b !== "Store") || BRANCHES[0]);
   const [editKitchenId, setEditKitchenId] = useState(null);
@@ -1373,7 +1565,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next); setEditSupplierId(null); flash("Supplier updated");
   };
 
-  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); flash("User added"); };
+  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens, notifications: newUserNotifications }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); setNewUserNotifications(true); flash("User added"); };
   const delUser = (id) => persist({ ...db, users: db.users.filter(u => u.id !== id) });
   const toggleUserPerm = (userId, perm) => {
     const next = { ...db, users: db.users.map(u => {
@@ -1406,6 +1598,10 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
       const has = (u.kitchens || []).includes(kitchenId);
       return { ...u, kitchens: has ? u.kitchens.filter(x => x !== kitchenId) : [...(u.kitchens || []), kitchenId] };
     }) };
+    persist(next);
+  };
+  const toggleUserNotifications = (userId) => {
+    const next = { ...db, users: db.users.map(u => u.id === userId ? { ...u, notifications: u.notifications === false } : u) };
     persist(next);
   };
 
@@ -1629,6 +1825,9 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               )}
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Report tabs visible</div>
               <div className="mb-3"><ReportTabChips selected={newUserReportTabs} onToggle={(t) => setNewUserReportTabs(v => v.includes(t) ? v.filter(x => x !== t) : [...v, t])} /></div>
+              <label className="flex items-center gap-2 mb-3 text-sm font-medium">
+                <input type="checkbox" checked={newUserNotifications} onChange={e => setNewUserNotifications(e.target.checked)} /> Push notifications enabled
+              </label>
               <button onClick={addUser} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add User</button>
             </div>
             {db.users.map(u => (
@@ -1653,6 +1852,9 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                     <ReportTabChips selected={(u.reportTabs && u.reportTabs.length) ? u.reportTabs : [...REPORT_TABS]} onToggle={(t) => toggleUserReportTab(u.id, t)} />
                   </React.Fragment>
                 )}
+                <label className="flex items-center gap-2 mt-2.5 text-xs font-semibold text-[#5C6B62]">
+                  <input type="checkbox" checked={u.notifications !== false} onChange={() => toggleUserNotifications(u.id)} /> Push notifications enabled
+                </label>
               </div>
             ))}
           </React.Fragment>
