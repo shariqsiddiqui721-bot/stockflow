@@ -155,6 +155,32 @@ function ReportTabChips({ selected, onToggle }) {
   );
 }
 
+// A branch "has kitchens" if any kitchen record points to it.
+function kitchensOf(db, branch) {
+  return (db.kitchens || []).filter(k => k.branch === branch);
+}
+
+// Kitchens a given user is allowed to record for, within one branch.
+// Empty session.kitchens means "all kitchens in their branches" (no restriction).
+function myKitchensFor(db, session, branch) {
+  const branchKitchens = kitchensOf(db, branch);
+  if (!session.kitchens || session.kitchens.length === 0) return branchKitchens;
+  return branchKitchens.filter(k => session.kitchens.includes(k.id));
+}
+
+function KitchenChips({ kitchens, selected, onToggle }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {kitchens.map(k => (
+        <button key={k.id} type="button" onClick={() => onToggle(k.id)}
+          className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${selected.includes(k.id) ? "bg-[#8A4A4A] text-white border-[#8A4A4A]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>
+          {k.name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /* ---------- App ---------- */
 
 function App() {
@@ -458,7 +484,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
             return (
               <div key={it.id} className="bg-white rounded-xl p-3 border-2 border-[#EAE4D4]">
                 <div className="flex items-center justify-between mb-2">
-                  <div className="font-semibold text-[#1F2A24]">{it.name}</div>
+                  <div className="font-semibold text-[#1F2A24]">{it.name}{it.nameUr && <span className="text-[#8A9690] font-normal"> — {it.nameUr}</span>}</div>
                   <div className="text-[11px] text-[#8A9690]">{it.unit}{p?.cashOnly ? " · cash only" : ""}</div>
                 </div>
                 <div className="grid grid-cols-3 gap-2 items-center">
@@ -497,7 +523,7 @@ function ItemQtyGrid({ items, values, setValues, stockCheck }) {
         return (
           <div key={it.id} className={`bg-white rounded-xl p-3 border-2 flex items-center justify-between gap-3 ${over ? "border-[#B33A3A]" : "border-[#EAE4D4]"}`}>
             <div className="min-w-0">
-              <div className="font-semibold text-[#1F2A24] truncate">{it.name}</div>
+              <div className="font-semibold text-[#1F2A24] truncate">{it.name}{it.nameUr && <span className="text-[#8A9690] font-normal"> — {it.nameUr}</span>}</div>
               <div className="text-[11px] text-[#8A9690]">{it.unit}{stockCheck && <span className={over ? "text-[#B33A3A] font-bold" : ""}> · {avail} in stock</span>}</div>
             </div>
             <input className="w-24 bg-[#F7F5F0] border-2 border-[#D8D2C2] rounded-lg px-2 py-2 text-right font-mono font-bold text-[16px] focus:outline-none focus:border-[#C98A2C]"
@@ -515,10 +541,13 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const [from, setFrom] = useState(myBranches[0]);
   const [to, setTo] = useState(BRANCHES.find(b => b !== myBranches[0]) || BRANCHES[1]);
+  const toKitchens = kitchensOf(db, to);
+  const [kitchenId, setKitchenId] = useState("");
   const [category, setCategory] = useState(db.categories[0]);
   const [values, setValues] = useState({});
   const items = db.items.filter(i => i.category === category);
-  useEffect(() => { setValues({}); }, [category, from, to]);
+  useEffect(() => { setValues({}); }, [category, from, to, kitchenId]);
+  useEffect(() => { setKitchenId(""); }, [to]);
   const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
   const anyOver = entries.some(([id, v]) => Number(v) > stockOf(from, id));
 
@@ -526,9 +555,10 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
     if (from === to) { flash("From and To must differ", "error"); return; }
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
     if (anyOver) { flash("Not enough stock for one or more items", "error"); return; }
-    const recs = entries.map(([itemId, v]) => ({ id: uid("iss"), date: todayStr(), from, to, itemId, qty: Number(v), userId: session.id }));
+    const recs = entries.map(([itemId, v]) => ({ id: uid("iss"), date: todayStr(), from, to, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
     const next = { ...db, issues: [...recs, ...db.issues] };
-    addLog(next, "Issue", `${from} → ${to}: ${entries.length} item(s)`);
+    const kName = toKitchens.find(k => k.id === kitchenId)?.name;
+    addLog(next, "Issue", `${from} → ${to}${kName ? " (" + kName + ")" : ""}: ${entries.length} item(s)`);
     persist(next); flash("Issue saved"); setValues({});
   };
 
@@ -540,6 +570,14 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
           <Field label="Issue From"><select className={selCls} value={from} onChange={e => setFrom(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
           <Field label="Issue To"><select className={selCls} value={to} onChange={e => setTo(e.target.value)}>{BRANCHES.filter(b => b !== from).map(b => <option key={b}>{b}</option>)}</select></Field>
         </div>
+        {toKitchens.length > 0 && (
+          <Field label="Kitchen (optional)">
+            <select className={selCls} value={kitchenId} onChange={e => setKitchenId(e.target.value)}>
+              <option value="">— Branch general —</option>
+              {toKitchens.map(k => <option key={k.id} value={k.id}>{k.name}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Items & Quantity</div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} stockCheck={(id) => stockOf(from, id)} /></div>
@@ -554,17 +592,22 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
 function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const [branch, setBranch] = useState(myBranches[0]);
+  const myKitchens = myKitchensFor(db, session, branch);
+  const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
   const [category, setCategory] = useState(db.categories[0]);
   const [values, setValues] = useState({});
   const items = db.items.filter(i => i.category === category);
-  useEffect(() => { setValues({}); }, [category, branch]);
+  useEffect(() => { setValues({}); }, [category, branch, kitchenId]);
+  useEffect(() => { setKitchenId(myKitchensFor(db, session, branch)[0]?.id || ""); }, [branch]);
   const entries = Object.entries(values).filter(([, v]) => v !== "" && v !== undefined);
 
   const save = () => {
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
-    const recs = entries.map(([itemId, v]) => ({ id: uid("end"), date: todayStr(), branch, itemId, qty: Number(v), userId: session.id }));
+    if (myKitchens.length > 0 && !kitchenId) { flash("Select a kitchen", "error"); return; }
+    const recs = entries.map(([itemId, v]) => ({ id: uid("end"), date: todayStr(), branch, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
     const next = { ...db, endings: [...recs, ...db.endings] };
-    addLog(next, "Ending", `${branch}: ${entries.length} item(s)`);
+    const kName = myKitchens.find(k => k.id === kitchenId)?.name;
+    addLog(next, "Ending", `${branch}${kName ? " — " + kName : ""}: ${entries.length} item(s)`);
     persist(next); flash("Ending saved"); setValues({});
   };
 
@@ -573,6 +616,13 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
       <TopBar title="Ending" onBack={onDone} />
       <div className="p-5">
         <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
+        {myKitchens.length > 0 && (
+          <Field label="Kitchen">
+            <select className={selCls} value={kitchenId} onChange={e => setKitchenId(e.target.value)}>
+              {myKitchens.map(k => <option key={k.id} value={k.id}>{k.name}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Closing Count</div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
@@ -639,17 +689,22 @@ function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone
 function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const [branch, setBranch] = useState(myBranches[0]);
+  const myKitchens = myKitchensFor(db, session, branch);
+  const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
   const [category, setCategory] = useState(db.categories[0]);
   const [values, setValues] = useState({});
   const items = db.items.filter(i => i.category === category);
-  useEffect(() => { setValues({}); }, [category, branch]);
+  useEffect(() => { setValues({}); }, [category, branch, kitchenId]);
+  useEffect(() => { setKitchenId(myKitchensFor(db, session, branch)[0]?.id || ""); }, [branch]);
   const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
 
   const save = () => {
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
-    const recs = entries.map(([itemId, v]) => ({ id: uid("dem"), date: todayStr(), branch, itemId, qty: Number(v), userId: session.id }));
+    if (myKitchens.length > 0 && !kitchenId) { flash("Select a kitchen", "error"); return; }
+    const recs = entries.map(([itemId, v]) => ({ id: uid("dem"), date: todayStr(), branch, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
     const next = { ...db, demands: [...recs, ...db.demands] };
-    addLog(next, "Demand", `${branch}: ${entries.length} item(s)`);
+    const kName = myKitchens.find(k => k.id === kitchenId)?.name;
+    addLog(next, "Demand", `${branch}${kName ? " — " + kName : ""}: ${entries.length} item(s)`);
     persist(next); flash("Demand saved"); setValues({});
   };
 
@@ -658,6 +713,13 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
       <TopBar title="Demand" onBack={onDone} />
       <div className="p-5">
         <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
+        {myKitchens.length > 0 && (
+          <Field label="Kitchen">
+            <select className={selCls} value={kitchenId} onChange={e => setKitchenId(e.target.value)}>
+              {myKitchens.map(k => <option key={k.id} value={k.id}>{k.name}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Quantity Required</div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
@@ -726,7 +788,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Supplier Ledger", "Demand vs Issue", "By Category", "Ending", "Adjustments", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Supplier Ledger", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Activity Log"];
 
 function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf, onBack }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
@@ -736,6 +798,10 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   const [catFilter, setCatFilter] = useState("");
   const [dateFilter, setDateFilter] = useState(todayStr());
   const [muBranch, setMuBranch] = useState(myBranches[0]);
+  const [khItemId, setKhItemId] = useState("");
+  const [adjOpenBranch, setAdjOpenBranch] = useState(null);
+  const [adjQty, setAdjQty] = useState("");
+  const [adjReason, setAdjReason] = useState("");
   const [ledgerSupplierId, setLedgerSupplierId] = useState(db.suppliers[0]?.id || "");
   const ledgerSupplier = db.suppliers.find(s => s.id === ledgerSupplierId);
   const [editPurchaseId, setEditPurchaseId] = useState(null);
@@ -756,6 +822,15 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
     const next = { ...db, purchases: db.purchases.filter(p => p.id !== id) };
     addLog(next, "Admin", `Deleted a purchase entry`);
     persist(next); flash("Purchase deleted");
+  };
+
+  const saveDemandAdjustment = (branch, itemId) => {
+    const qty = Number(adjQty);
+    if (!qty) { flash("Enter a non-zero amount", "error"); return; }
+    const rec = { id: uid("dadj"), date: dateFilter || todayStr(), branch, itemId, qty, reason: adjReason.trim(), userId: session.id };
+    const next = { ...db, demandAdjustments: [rec, ...(db.demandAdjustments || [])] };
+    addLog(next, "Demand Adjustment", `${branch} ${itemName(itemId)}: ${qty > 0 ? "+" : ""}${qty}${adjReason ? " (" + adjReason + ")" : ""}`);
+    persist(next); setAdjOpenBranch(null); setAdjQty(""); setAdjReason(""); flash("Adjustment saved");
   };
 
   // Opening balance for an item at a branch: stock as of the day before the given date.
@@ -988,6 +1063,94 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             </table>
           </ReportTable>
         )}
+        {tab === "Kitchens" && (() => {
+          const eff = dateFilter || todayStr();
+          const khItems = filteredItems.length ? filteredItems : db.items;
+          const activeItemId = khItems.find(i => i.id === khItemId)?.id || khItems[0]?.id || "";
+          const sumRecs = (arr, branch, kitchenId) => arr.filter(r => r.itemId === activeItemId && r.date === eff && r.branch === branch && (r.kitchenId || null) === kitchenId).reduce((a, r) => a + r.qty, 0);
+          const receivedSum = (branch, kitchenId) => db.issues.filter(r => r.itemId === activeItemId && r.date === eff && r.to === branch && (r.kitchenId || null) === kitchenId).reduce((a, r) => a + r.qty, 0);
+          const isAdmin = (session.permissions || []).includes("admin");
+
+          const rows = (metric) => {
+            let grand = 0;
+            const out = [];
+            myBranches.forEach(b => {
+              const bKitchens = kitchensOf(db, b);
+              let branchTotal = 0;
+              if (bKitchens.length > 0) {
+                bKitchens.forEach(k => {
+                  const v = metric === "received" ? receivedSum(b, k.id) : sumRecs(db[metric], b, k.id);
+                  branchTotal += v;
+                  if (v !== 0) out.push({ label: `${k.name} (${b})`, value: v, indent: true });
+                });
+                const generalV = metric === "received" ? receivedSum(b, null) : sumRecs(db[metric], b, null);
+                branchTotal += generalV;
+                if (generalV !== 0) out.push({ label: `${b} — general`, value: generalV, indent: true });
+              } else {
+                branchTotal = metric === "received" ? receivedSum(b, null) : sumRecs(db[metric], b, null);
+              }
+              if (bKitchens.length > 0 || branchTotal !== 0) out.push({ label: `${b} Total`, value: branchTotal, bold: true });
+              grand += branchTotal;
+            });
+            return { out, grand };
+          };
+
+          const demandRows = rows("demands");
+          const issueRows = rows("received");
+          const endingRows = rows("endings");
+
+          return (
+            <React.Fragment>
+              <select className={selCls + " mb-4"} value={activeItemId} onChange={e => setKhItemId(e.target.value)}>
+                {khItems.map(i => <option key={i.id} value={i.id}>{i.name}{i.nameUr ? " — " + i.nameUr : ""}</option>)}
+              </select>
+
+              {[
+                { title: "Demand", data: demandRows, color: "#B3562C", adjustable: true },
+                { title: "Received (Issued)", data: issueRows, color: "#2B6E63" },
+                { title: "Ending", data: endingRows, color: "#4A6FA5" },
+              ].map(section => (
+                <div key={section.title} className="bg-white rounded-xl p-3 border border-[#EAE4D4] mb-3">
+                  <div className="font-bold text-[#1F2A24] mb-2">{section.title} — {eff}</div>
+                  {section.data.out.length === 0 && <div className="text-sm text-[#8A9690] mb-2">No entries.</div>}
+                  {section.data.out.map((r, idx) => (
+                    <div key={idx} className={`flex justify-between py-1 text-sm ${r.bold ? "font-bold border-t border-[#EFEBDF] mt-1 pt-1.5" : "text-[#5C6B62]"}`}>
+                      <span className={r.indent ? "pl-3" : ""}>{r.label}</span>
+                      <span className="font-mono">{r.value}</span>
+                    </div>
+                  ))}
+                  <div className="flex justify-between pt-2 mt-1 border-t-2 border-[#1F2A24] font-bold">
+                    <span>Grand Total</span>
+                    <span className="font-mono">{section.data.grand}</span>
+                  </div>
+                  {section.adjustable && isAdmin && (
+                    <div className="mt-3 pt-3 border-t border-dashed border-[#EAE4D4]">
+                      {myBranches.filter(b => kitchensOf(db, b).length > 0).map(b => {
+                        const rawTotal = kitchensOf(db, b).reduce((a, k) => a + sumRecs(db.demands, b, k.id), 0) + sumRecs(db.demands, b, null);
+                        const adj = (db.demandAdjustments || []).filter(a => a.branch === b && a.itemId === activeItemId && a.date === eff).reduce((a, x) => a + x.qty, 0);
+                        return (
+                          <div key={b} className="mb-2">
+                            <div className="flex justify-between items-center text-sm">
+                              <span className="font-semibold">{b}: raw {rawTotal} {adj !== 0 && <span className={adj > 0 ? "text-[#2B6E63]" : "text-[#B33A3A]"}>({adj > 0 ? "+" : ""}{adj} adj)</span>} = <b>{rawTotal + adj}</b></span>
+                              <button onClick={() => setAdjOpenBranch(adjOpenBranch === b ? null : b)} className="text-xs font-semibold text-[#4A6FA5] bg-[#4A6FA5]/10 px-2.5 py-1 rounded-full">Add/Less</button>
+                            </div>
+                            {adjOpenBranch === b && (
+                              <div className="flex gap-2 mt-2">
+                                <input className={numCls} type="number" placeholder="+/- qty" value={adjQty} onChange={e => setAdjQty(e.target.value)} />
+                                <input className={numCls + " font-sans"} placeholder="Reason" value={adjReason} onChange={e => setAdjReason(e.target.value)} />
+                                <button onClick={() => saveDemandAdjustment(b, activeItemId)} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Save</button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </React.Fragment>
+          );
+        })()}
         {tab === "Ending" && (
           <ReportTable
             title={dateFilter ? `Ending Count — ${dateFilter}` : "Ending Count — All Dates (latest each)"}
@@ -1066,6 +1229,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [tab, setTab] = useState("Items");
   const [itemQ, setItemQ] = useState("");
   const [newItemName, setNewItemName] = useState("");
+  const [newItemNameUr, setNewItemNameUr] = useState("");
   const [newItemCat, setNewItemCat] = useState(db.categories[0]);
   const [newItemUnit, setNewItemUnit] = useState("kg");
   const [newSupplierName, setNewSupplierName] = useState("");
@@ -1075,15 +1239,20 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newUserPerms, setNewUserPerms] = useState(["purchase"]);
   const [newUserBranches, setNewUserBranches] = useState([...BRANCHES]);
   const [newUserReportTabs, setNewUserReportTabs] = useState([...REPORT_TABS]);
+  const [newUserKitchens, setNewUserKitchens] = useState([]);
+  const [newKitchenName, setNewKitchenName] = useState("");
+  const [newKitchenBranch, setNewKitchenBranch] = useState(BRANCHES.find(b => b !== "Store") || BRANCHES[0]);
+  const [editKitchenId, setEditKitchenId] = useState(null);
+  const [editKitchenDraft, setEditKitchenDraft] = useState({});
   const [ratesSupplierId, setRatesSupplierId] = useState(db.suppliers[0]?.id || "");
   const [editItemId, setEditItemId] = useState(null);
   const [editItemDraft, setEditItemDraft] = useState({});
   const [editSupplierId, setEditSupplierId] = useState(null);
   const [editSupplierDraft, setEditSupplierDraft] = useState({});
 
-  const addItem = () => { if (!newItemName.trim()) return; const rec = { id: uid("i"), name: newItemName.trim(), category: newItemCat, unit: newItemUnit || "unit" }; const next = { ...db, items: [...db.items, rec] }; addLog(next, "Admin", `Added item ${rec.name}`); persist(next); setNewItemName(""); flash("Item added"); };
+  const addItem = () => { if (!newItemName.trim()) return; const rec = { id: uid("i"), name: newItemName.trim(), nameUr: newItemNameUr.trim(), category: newItemCat, unit: newItemUnit || "unit" }; const next = { ...db, items: [...db.items, rec] }; addLog(next, "Admin", `Added item ${rec.name}`); persist(next); setNewItemName(""); setNewItemNameUr(""); flash("Item added"); };
   const delItem = (id) => persist({ ...db, items: db.items.filter(i => i.id !== id) });
-  const startEditItem = (i) => { setEditItemId(i.id); setEditItemDraft({ name: i.name, category: i.category, unit: i.unit }); };
+  const startEditItem = (i) => { setEditItemId(i.id); setEditItemDraft({ name: i.name, nameUr: i.nameUr || "", category: i.category, unit: i.unit }); };
   const saveEditItem = () => {
     const next = { ...db, items: db.items.map(i => i.id === editItemId ? { ...i, ...editItemDraft } : i) };
     addLog(next, "Admin", `Edited item ${editItemDraft.name}`);
@@ -1101,7 +1270,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next); setEditSupplierId(null); flash("Supplier updated");
   };
 
-  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); flash("User added"); };
+  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); flash("User added"); };
   const delUser = (id) => persist({ ...db, users: db.users.filter(u => u.id !== id) });
   const toggleUserPerm = (userId, perm) => {
     const next = { ...db, users: db.users.map(u => {
@@ -1128,6 +1297,29 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     }) };
     persist(next);
   };
+  const toggleUserKitchen = (userId, kitchenId) => {
+    const next = { ...db, users: db.users.map(u => {
+      if (u.id !== userId) return u;
+      const has = (u.kitchens || []).includes(kitchenId);
+      return { ...u, kitchens: has ? u.kitchens.filter(x => x !== kitchenId) : [...(u.kitchens || []), kitchenId] };
+    }) };
+    persist(next);
+  };
+
+  const addKitchen = () => {
+    if (!newKitchenName.trim()) return;
+    const rec = { id: uid("k"), name: newKitchenName.trim(), branch: newKitchenBranch };
+    const next = { ...db, kitchens: [...(db.kitchens || []), rec] };
+    addLog(next, "Admin", `Added kitchen ${rec.name} (${rec.branch})`);
+    persist(next); setNewKitchenName(""); flash("Kitchen added");
+  };
+  const delKitchen = (id) => persist({ ...db, kitchens: (db.kitchens || []).filter(k => k.id !== id) });
+  const startEditKitchen = (k) => { setEditKitchenId(k.id); setEditKitchenDraft({ name: k.name, branch: k.branch }); };
+  const saveEditKitchen = () => {
+    const next = { ...db, kitchens: (db.kitchens || []).map(k => k.id === editKitchenId ? { ...k, ...editKitchenDraft } : k) };
+    addLog(next, "Admin", `Edited kitchen ${editKitchenDraft.name}`);
+    persist(next); setEditKitchenId(null); flash("Kitchen updated");
+  };
 
   const ratesSupplier = db.suppliers.find(s => s.id === ratesSupplierId);
   const setPricing = (itemId, patch) => {
@@ -1137,9 +1329,9 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   };
 
   const resetTransactions = () => {
-    if (!window.confirm("This deletes ALL purchase, issue, ending, demand, and payment entries plus the activity log — permanently. Items, suppliers, users, and rates stay. Continue?")) return;
+    if (!window.confirm("This deletes ALL purchase, issue, ending, demand, adjustment, and payment entries plus the activity log — permanently. Items, suppliers, users, kitchens, and rates stay. Continue?")) return;
     if (!window.confirm("Are you sure? This cannot be undone.")) return;
-    const next = { ...db, purchases: [], issues: [], endings: [], demands: [], payments: [], todayRates: {}, log: [] };
+    const next = { ...db, purchases: [], issues: [], endings: [], demands: [], payments: [], adjustments: [], demandAdjustments: [], todayRates: {}, log: [] };
     persist(next);
     flash("All entries cleared — items, suppliers and users kept");
   };
@@ -1148,7 +1340,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     <div>
       <TopBar title="Admin" onBack={onBack} />
       <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
-        {["Items", "Suppliers", "Rates", "Users", "Reset"].map(t => (
+        {["Items", "Suppliers", "Rates", "Kitchens", "Users", "Reset"].map(t => (
           <button key={t} onClick={() => setTab(t)} className={`flex-1 whitespace-nowrap py-2.5 px-3 rounded-xl text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
         ))}
       </div>
@@ -1158,12 +1350,13 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
             <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
               <div className="grid grid-cols-2 gap-2 mb-2">
                 <input className={numCls + " font-sans"} placeholder="Item name" value={newItemName} onChange={e => setNewItemName(e.target.value)} />
+                <input className={numCls + " font-sans"} placeholder="Urdu name (optional)" value={newItemNameUr} onChange={e => setNewItemNameUr(e.target.value)} dir="rtl" />
+              </div>
+              <div className="grid grid-cols-2 gap-2 mb-2">
                 <select className={selCls} value={newItemCat} onChange={e => setNewItemCat(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select>
-              </div>
-              <div className="flex gap-2">
                 <input className={numCls + " font-sans"} placeholder="Unit (kg, ltr...)" value={newItemUnit} onChange={e => setNewItemUnit(e.target.value)} />
-                <button onClick={addItem} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold">+ Add</button>
               </div>
+              <button onClick={addItem} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add</button>
             </div>
             <input className={numCls + " font-sans mb-3"} placeholder={`Search ${db.items.length} items…`} value={itemQ} onChange={e => setItemQ(e.target.value)} />
             {db.items.filter(i => i.name.toLowerCase().includes(itemQ.toLowerCase())).map(i => (
@@ -1171,17 +1364,20 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 <div key={i.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
                   <div className="grid grid-cols-2 gap-2 mb-2">
                     <input className={numCls + " font-sans"} value={editItemDraft.name} onChange={e => setEditItemDraft(d => ({ ...d, name: e.target.value }))} />
+                    <input className={numCls + " font-sans"} value={editItemDraft.nameUr} onChange={e => setEditItemDraft(d => ({ ...d, nameUr: e.target.value }))} dir="rtl" placeholder="Urdu name" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
                     <select className={selCls} value={editItemDraft.category} onChange={e => setEditItemDraft(d => ({ ...d, category: e.target.value }))}>{db.categories.map(c => <option key={c}>{c}</option>)}</select>
+                    <input className={numCls + " font-sans"} value={editItemDraft.unit} onChange={e => setEditItemDraft(d => ({ ...d, unit: e.target.value }))} />
                   </div>
                   <div className="flex gap-2">
-                    <input className={numCls + " font-sans"} value={editItemDraft.unit} onChange={e => setEditItemDraft(d => ({ ...d, unit: e.target.value }))} />
                     <button onClick={saveEditItem} className="bg-[#2B6E63] text-white px-4 rounded-xl font-semibold">Save</button>
                     <button onClick={() => setEditItemId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 rounded-xl font-semibold">Cancel</button>
                   </div>
                 </div>
               ) : (
                 <div key={i.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
-                  <span className="text-sm"><b>{i.name}</b> <span className="text-[#8A9690]">· {i.category} · {i.unit}</span></span>
+                  <span className="text-sm"><b>{i.name}</b>{i.nameUr && <span> · {i.nameUr}</span>} <span className="text-[#8A9690]">· {i.category} · {i.unit}</span></span>
                   <div className="flex items-center gap-3">
                     <button onClick={() => startEditItem(i)} className="text-[#5C6B62]">✎</button>
                     <button onClick={() => delItem(i.id)} className="text-[#B33A3A]">✕</button>
@@ -1268,6 +1464,49 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
             {ratesSupplier && ratesSupplier.itemIds.length === 0 && <div className="text-sm text-[#8A9690]">This supplier has no linked items yet — add them in the Suppliers tab.</div>}
           </React.Fragment>
         )}
+        {tab === "Kitchens" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <input className={numCls + " font-sans"} placeholder="Kitchen name" value={newKitchenName} onChange={e => setNewKitchenName(e.target.value)} />
+                <select className={selCls} value={newKitchenBranch} onChange={e => setNewKitchenBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select>
+              </div>
+              <button onClick={addKitchen} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Kitchen</button>
+            </div>
+            {BRANCHES.map(b => {
+              const list = (db.kitchens || []).filter(k => k.branch === b);
+              if (list.length === 0) return null;
+              return (
+                <div key={b} className="mb-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">{b}</div>
+                  {list.map(k => (
+                    editKitchenId === k.id ? (
+                      <div key={k.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                          <input className={numCls + " font-sans"} value={editKitchenDraft.name} onChange={e => setEditKitchenDraft(d => ({ ...d, name: e.target.value }))} />
+                          <select className={selCls} value={editKitchenDraft.branch} onChange={e => setEditKitchenDraft(d => ({ ...d, branch: e.target.value }))}>{BRANCHES.map(bb => <option key={bb}>{bb}</option>)}</select>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={saveEditKitchen} className="bg-[#2B6E63] text-white px-4 rounded-xl font-semibold">Save</button>
+                          <button onClick={() => setEditKitchenId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 rounded-xl font-semibold">Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div key={k.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                        <span className="text-sm"><b>{k.name}</b></span>
+                        <div className="flex items-center gap-3">
+                          <button onClick={() => startEditKitchen(k)} className="text-[#5C6B62]">✎</button>
+                          <button onClick={() => delKitchen(k.id)} className="text-[#B33A3A]">✕</button>
+                        </div>
+                      </div>
+                    )
+                  ))}
+                </div>
+              );
+            })}
+            {(db.kitchens || []).length === 0 && <div className="text-sm text-[#8A9690]">No kitchens yet. Only branches with kitchens get a kitchen-selection step in Ending/Demand/Issue.</div>}
+          </React.Fragment>
+        )}
         {tab === "Users" && (
           <React.Fragment>
             <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
@@ -1279,6 +1518,12 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               <div className="mb-3"><PermChips selected={newUserPerms} onToggle={(p) => setNewUserPerms(v => v.includes(p) ? v.filter(x => x !== p) : [...v, p])} /></div>
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Branches</div>
               <div className="mb-3"><BranchChips selected={newUserBranches} onToggle={(b) => setNewUserBranches(v => v.includes(b) ? v.filter(x => x !== b) : [...v, b])} /></div>
+              {(db.kitchens || []).filter(k => newUserBranches.includes(k.branch)).length > 0 && (
+                <React.Fragment>
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Kitchens (leave blank for all in their branches)</div>
+                  <div className="mb-3"><KitchenChips kitchens={(db.kitchens || []).filter(k => newUserBranches.includes(k.branch))} selected={newUserKitchens} onToggle={(id) => setNewUserKitchens(v => v.includes(id) ? v.filter(x => x !== id) : [...v, id])} /></div>
+                </React.Fragment>
+              )}
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Report tabs visible</div>
               <div className="mb-3"><ReportTabChips selected={newUserReportTabs} onToggle={(t) => setNewUserReportTabs(v => v.includes(t) ? v.filter(x => x !== t) : [...v, t])} /></div>
               <button onClick={addUser} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add User</button>
@@ -1293,6 +1538,12 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 <PermChips selected={u.permissions || []} onToggle={(p) => toggleUserPerm(u.id, p)} />
                 <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Branches</div>
                 <BranchChips selected={u.branches || []} onToggle={(b) => toggleUserBranch(u.id, b)} />
+                {(db.kitchens || []).filter(k => (u.branches || []).includes(k.branch)).length > 0 && (
+                  <React.Fragment>
+                    <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Kitchens (blank = all in their branches)</div>
+                    <KitchenChips kitchens={(db.kitchens || []).filter(k => (u.branches || []).includes(k.branch))} selected={u.kitchens || []} onToggle={(id) => toggleUserKitchen(u.id, id)} />
+                  </React.Fragment>
+                )}
                 {(u.permissions || []).includes("reports") && (
                   <React.Fragment>
                     <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Report tabs visible</div>
