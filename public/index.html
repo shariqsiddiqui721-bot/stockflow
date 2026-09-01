@@ -507,7 +507,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
   useEffect(() => { if (anyCashOnly) setPayMode("cash"); }, [anyCashOnly]);
 
   const categoriesNeedingToday = [...new Set(
-    visibleItems.filter(i => rows[i.id]?.qty && pricingByItem[i.id]?.needsToday).map(i => pricingByItem[i.id].category)
+    visibleItems.filter(i => pricingByItem[i.id]?.needsToday).map(i => pricingByItem[i.id].category)
   )];
 
   const setRow = (itemId, field, value) => setRows(v => ({ ...v, [itemId]: { ...v[itemId], [field]: value } }));
