@@ -509,6 +509,12 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
   const categoriesNeedingToday = [...new Set(
     visibleItems.filter(i => pricingByItem[i.id]?.needsToday).map(i => pricingByItem[i.id].category)
   )];
+  // Every category with at least one formula-priced item in view, whether or not today's rate is already set —
+  // shown so the rate is always visible/changeable, not just the first time it's missing.
+  const formulaCategories = [...new Set(
+    visibleItems.filter(i => pricingByItem[i.id]?.mode === "formula").map(i => pricingByItem[i.id].category)
+  )];
+  const [editingTodayCat, setEditingTodayCat] = useState(null);
 
   const setRow = (itemId, field, value) => setRows(v => ({ ...v, [itemId]: { ...v[itemId], [field]: value } }));
 
@@ -518,6 +524,16 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
     const next = { ...db, todayRates: { ...db.todayRates, [cat]: { date: todayStr(), rate: Number(val) } } };
     addLog(next, "Today's Rate", `${cat} rate set to ${val}`);
     persist(next);
+    // Clear any rates already shown for this category's formula items so they recompute with the new rate.
+    setRows(prev => {
+      const next2 = { ...prev };
+      visibleItems.forEach(i => {
+        if (pricingByItem[i.id]?.mode === "formula" && pricingByItem[i.id]?.category === cat) {
+          next2[i.id] = { ...next2[i.id], rate: "" };
+        }
+      });
+      return next2;
+    });
     setTodayInputs(v => ({ ...v, [cat]: "" }));
     flash("Today's rate saved");
   };
@@ -573,16 +589,31 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
           </Field>
         )}
 
-        {categoriesNeedingToday.map(cat => (
-          <div key={cat} className="bg-[#FBF0DD] border-2 border-[#C98A2C] rounded-xl p-3.5 mb-4">
-            <div className="text-sm font-semibold text-[#7A5C2E] mb-2">Set today's {cat} rate first</div>
-            <div className="flex gap-2">
-              <input className={numCls} type="number" inputMode="decimal" placeholder="e.g. 450"
-                value={todayInputs[cat] || ""} onChange={e => setTodayInputs(v => ({ ...v, [cat]: e.target.value }))} />
-              <button onClick={() => saveTodayRate(cat)} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Set</button>
+        {formulaCategories.map(cat => {
+          const needsToday = categoriesNeedingToday.includes(cat);
+          const currentRate = db.todayRates?.[cat]?.rate;
+          const isOpen = needsToday || editingTodayCat === cat;
+          return (
+            <div key={cat} className="bg-[#FBF0DD] border-2 border-[#C98A2C] rounded-xl p-3.5 mb-4">
+              {!isOpen ? (
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-[#7A5C2E]">Today's {cat} rate: <span className="font-mono">{currentRate}</span></div>
+                  <button onClick={() => { setEditingTodayCat(cat); setTodayInputs(v => ({ ...v, [cat]: String(currentRate ?? "") })); }} className="text-xs font-semibold text-[#7A5C2E] bg-white px-3 py-1.5 rounded-full border border-[#C98A2C]">Change</button>
+                </div>
+              ) : (
+                <React.Fragment>
+                  <div className="text-sm font-semibold text-[#7A5C2E] mb-2">{needsToday ? `Set today's ${cat} rate first` : `Update today's ${cat} rate`}</div>
+                  <div className="flex gap-2">
+                    <input className={numCls} type="number" inputMode="decimal" placeholder="e.g. 450"
+                      value={todayInputs[cat] || ""} onChange={e => setTodayInputs(v => ({ ...v, [cat]: e.target.value }))} />
+                    <button onClick={() => { saveTodayRate(cat); setEditingTodayCat(null); }} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Set</button>
+                    {!needsToday && <button onClick={() => setEditingTodayCat(null)} className="bg-white text-[#7A5C2E] px-3 rounded-xl font-semibold border border-[#C98A2C]">Cancel</button>}
+                  </div>
+                </React.Fragment>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
 
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">
           {payMode === "cash"
