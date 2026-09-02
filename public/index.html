@@ -691,6 +691,29 @@ function ItemQtyGrid({ items, values, setValues, stockCheck }) {
   );
 }
 
+// Compact "pick item + qty, add to list" builder used for recipe consumes/produces lists.
+function RecipeItemList({ db, list, onAdd, onRemove, addItemId, setAddItemId, addQty, setAddQty }) {
+  const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
+  return (
+    <div>
+      {list.map(row => (
+        <div key={row.itemId} className="flex justify-between items-center bg-white rounded-lg p-2 mb-1.5 border border-[#EFEBDF]">
+          <span className="text-sm">{itemName(row.itemId)} <span className="text-[#8A9690] font-mono">× {row.qty}</span></span>
+          <button onClick={() => onRemove(row.itemId)} className="text-[#B33A3A] text-xs font-semibold">✕</button>
+        </div>
+      ))}
+      <div className="flex gap-2 mt-1">
+        <select className={selCls} value={addItemId} onChange={e => setAddItemId(e.target.value)}>
+          <option value="">Select item…</option>
+          {db.items.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+        </select>
+        <input className={numCls + " w-20"} type="number" placeholder="Qty" value={addQty} onChange={e => setAddQty(e.target.value)} />
+        <button onClick={onAdd} className="bg-[#2B6E63] text-white px-3 rounded-xl font-semibold whitespace-nowrap">+ Add</button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Issue ---------- */
 
 function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
@@ -853,35 +876,33 @@ function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone
 function ConversionScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const [branch, setBranch] = useState(myBranches[0]);
-  const [usedCategory, setUsedCategory] = useState(db.categories[0]);
-  const [madeCategory, setMadeCategory] = useState(db.categories[0]);
+  const availableRecipes = (db.recipes || []).filter(r => !r.branch || r.branch === branch);
+  const [recipeId, setRecipeId] = useState("");
+  const [batches, setBatches] = useState("1");
   const [note, setNote] = useState("");
-  const [usedValues, setUsedValues] = useState({});
-  const [madeValues, setMadeValues] = useState({});
-  const usedItems = db.items.filter(i => i.category === usedCategory);
-  const madeItems = db.items.filter(i => i.category === madeCategory);
-  useEffect(() => { setUsedValues({}); }, [usedCategory, branch]);
-  useEffect(() => { setMadeValues({}); }, [madeCategory, branch]);
-  const usedEntries = Object.entries(usedValues).filter(([, v]) => Number(v) > 0);
-  const madeEntries = Object.entries(madeValues).filter(([, v]) => Number(v) > 0);
+  useEffect(() => { setRecipeId(availableRecipes[0]?.id || ""); }, [branch]);
+  const recipe = availableRecipes.find(r => r.id === recipeId);
+  const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
+  const mult = Number(batches) || 0;
 
   const save = () => {
-    if (usedEntries.length === 0 || madeEntries.length === 0) { flash("Enter what was used and what was made", "error"); return; }
-    const usedRecs = usedEntries.map(([itemId, v]) => ({
-      id: uid("adj"), date: todayStr(), branch, itemId, qty: -Math.abs(Number(v)),
-      kind: "conversion", reason: `Used to make: ${madeEntries.map(([mid, mv]) => `${mv} ${db.items.find(i => i.id === mid)?.name}`).join(", ")}${note ? " — " + note : ""}`,
+    if (!recipe) { flash("Select a recipe", "error"); return; }
+    if (mult <= 0) { flash("Enter how many batches", "error"); return; }
+    const usedRecs = recipe.consumes.map(c => ({
+      id: uid("adj"), date: todayStr(), branch, itemId: c.itemId, qty: -Math.abs(c.qty * mult),
+      kind: "conversion", reason: `Recipe: ${recipe.name} × ${mult}${note ? " — " + note : ""}`,
       userId: session.id,
     }));
-    const madeRecs = madeEntries.map(([itemId, v]) => ({
-      id: uid("adj"), date: todayStr(), branch, itemId, qty: Math.abs(Number(v)),
-      kind: "conversion", reason: `Made from: ${usedEntries.map(([uid_, uv]) => `${uv} ${db.items.find(i => i.id === uid_)?.name}`).join(", ")}${note ? " — " + note : ""}`,
+    const madeRecs = recipe.produces.map(p => ({
+      id: uid("adj"), date: todayStr(), branch, itemId: p.itemId, qty: Math.abs(p.qty * mult),
+      kind: "conversion", reason: `Recipe: ${recipe.name} × ${mult}${note ? " — " + note : ""}`,
       userId: session.id,
     }));
     const next = { ...db, adjustments: [...usedRecs, ...madeRecs, ...(db.adjustments || [])] };
-    addLog(next, "Conversion", `${branch}: used ${usedEntries.length} item(s), made ${madeEntries.length} item(s)${note ? " — " + note : ""}`);
+    addLog(next, "Conversion", `${branch}: ${recipe.name} × ${mult}${note ? " — " + note : ""}`);
     persist(next);
-    notifyUsers(adminRecipients(db), "Conversion Recorded", `${branch}: ${usedEntries.map(([id, v]) => `${v} ${db.items.find(i => i.id === id)?.name}`).join(", ")} → ${madeEntries.map(([id, v]) => `${v} ${db.items.find(i => i.id === id)?.name}`).join(", ")}`);
-    flash("Conversion saved"); setUsedValues({}); setMadeValues({}); setNote("");
+    notifyUsers(adminRecipients(db), "Conversion Recorded", `${branch}: ${recipe.name} × ${mult}`);
+    flash("Conversion saved"); setBatches("1"); setNote("");
   };
 
   return (
@@ -890,20 +911,46 @@ function ConversionScreen({ db, session, persist, addLog, flash, stockOf, onDone
       <div className="p-5">
         <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
 
-        <div className="text-sm font-bold text-[#1F2A24] mb-1.5">Raw Material Used</div>
-        <Field label="Category"><select className={selCls} value={usedCategory} onChange={e => setUsedCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
-        <div className="mb-5"><ItemQtyGrid items={usedItems} values={usedValues} setValues={setUsedValues} stockCheck={(id) => stockOf(branch, id)} /></div>
+        {availableRecipes.length === 0 ? (
+          <div className="text-sm text-[#8A9690] mb-4">No recipes set up for {branch} yet — ask your admin to add one in Admin &gt; Recipes.</div>
+        ) : (
+          <React.Fragment>
+            <Field label="Recipe">
+              <select className={selCls} value={recipeId} onChange={e => setRecipeId(e.target.value)}>
+                {availableRecipes.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+              </select>
+            </Field>
 
-        <div className="text-sm font-bold text-[#1F2A24] mb-1.5">Items Made</div>
-        <Field label="Category"><select className={selCls} value={madeCategory} onChange={e => setMadeCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
-        <div className="mb-5"><ItemQtyGrid items={madeItems} values={madeValues} setValues={setMadeValues} /></div>
+            {recipe && (
+              <div className="bg-white rounded-xl p-3.5 border-2 border-[#EAE4D4] mb-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-[#8A9690] mb-1.5">Uses</div>
+                {recipe.consumes.map(c => (
+                  <div key={c.itemId} className="flex justify-between text-sm py-0.5">
+                    <span>{itemName(c.itemId)}</span>
+                    <span className="font-mono">{(c.qty * mult) || c.qty}{mult !== 1 ? ` (${c.qty} × ${mult})` : ""}</span>
+                  </div>
+                ))}
+                <div className="text-xs font-semibold uppercase tracking-wide text-[#8A9690] mt-3 mb-1.5">Makes</div>
+                {recipe.produces.map(p => (
+                  <div key={p.itemId} className="flex justify-between text-sm py-0.5">
+                    <span>{itemName(p.itemId)}</span>
+                    <span className="font-mono">{(p.qty * mult) || p.qty}{mult !== 1 ? ` (${p.qty} × ${mult})` : ""}</span>
+                  </div>
+                ))}
+              </div>
+            )}
 
-        <Field label="Note (optional)">
-          <input className={numCls + " font-sans"} value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. evening batch" />
-        </Field>
+            <Field label="How many batches">
+              <input className={numCls} type="number" inputMode="decimal" value={batches} onChange={e => setBatches(e.target.value)} placeholder="1" />
+            </Field>
+            <Field label="Note (optional)">
+              <input className={numCls + " font-sans"} value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. evening batch" />
+            </Field>
 
-        <div className="text-[11px] text-[#8A9690] mb-4">Raw material is deducted and finished items are added to {branch}'s stock. Both show up in Reports → Adjustments, tagged "conversion".</div>
-        <button className={btnPrimary} onClick={save}>Save Conversion</button>
+            <div className="text-[11px] text-[#8A9690] mb-4">If the real output is different, save this as-is and correct the difference in Adjustment.</div>
+            <button className={btnPrimary} onClick={save}>Save Conversion</button>
+          </React.Fragment>
+        )}
       </div>
     </div>
   );
@@ -1701,6 +1748,20 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newKitchenItems, setNewKitchenItems] = useState([]);
   const [editKitchenId, setEditKitchenId] = useState(null);
   const [editKitchenDraft, setEditKitchenDraft] = useState({});
+  const [recipeName, setRecipeName] = useState("");
+  const [recipeBranch, setRecipeBranch] = useState("");
+  const [recipeConsumes, setRecipeConsumes] = useState([]); // [{itemId, qty}]
+  const [recipeProduces, setRecipeProduces] = useState([]);
+  const [recipeAddItemId, setRecipeAddItemId] = useState("");
+  const [recipeAddQty, setRecipeAddQty] = useState("");
+  const [recipeAddItemId2, setRecipeAddItemId2] = useState("");
+  const [recipeAddQty2, setRecipeAddQty2] = useState("");
+  const [editAddItemId, setEditAddItemId] = useState("");
+  const [editAddQty, setEditAddQty] = useState("");
+  const [editAddItemId2, setEditAddItemId2] = useState("");
+  const [editAddQty2, setEditAddQty2] = useState("");
+  const [editRecipeId, setEditRecipeId] = useState(null);
+  const [editRecipeDraft, setEditRecipeDraft] = useState(null);
   const [ratesSupplierId, setRatesSupplierId] = useState(db.suppliers[0]?.id || "");
   const [editItemId, setEditItemId] = useState(null);
   const [editItemDraft, setEditItemDraft] = useState({});
@@ -1783,6 +1844,28 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next); setEditKitchenId(null); flash("Kitchen updated");
   };
 
+  const addToRecipeList = (setList, list, itemId, qty, clearFns) => {
+    if (!itemId || !qty || Number(qty) <= 0) { flash("Pick an item and a quantity", "error"); return; }
+    if (list.some(x => x.itemId === itemId)) { flash("Already in the list", "error"); return; }
+    setList([...list, { itemId, qty: Number(qty) }]);
+    clearFns();
+  };
+  const addRecipe = () => {
+    if (!recipeName.trim() || recipeConsumes.length === 0 || recipeProduces.length === 0) { flash("Name, at least one used item and one made item required", "error"); return; }
+    const rec = { id: uid("rcp"), name: recipeName.trim(), branch: recipeBranch || null, consumes: recipeConsumes, produces: recipeProduces };
+    const next = { ...db, recipes: [...(db.recipes || []), rec] };
+    addLog(next, "Admin", `Added recipe ${rec.name}`);
+    persist(next); setRecipeName(""); setRecipeBranch(""); setRecipeConsumes([]); setRecipeProduces([]); flash("Recipe added");
+  };
+  const delRecipe = (id) => persist({ ...db, recipes: (db.recipes || []).filter(r => r.id !== id) });
+  const startEditRecipe = (r) => { setEditRecipeId(r.id); setEditRecipeDraft({ name: r.name, branch: r.branch || "", consumes: [...r.consumes], produces: [...r.produces] }); };
+  const saveEditRecipe = () => {
+    if (!editRecipeDraft.name.trim() || editRecipeDraft.consumes.length === 0 || editRecipeDraft.produces.length === 0) { flash("Name, at least one used item and one made item required", "error"); return; }
+    const next = { ...db, recipes: (db.recipes || []).map(r => r.id === editRecipeId ? { ...r, name: editRecipeDraft.name.trim(), branch: editRecipeDraft.branch || null, consumes: editRecipeDraft.consumes, produces: editRecipeDraft.produces } : r) };
+    addLog(next, "Admin", `Edited recipe ${editRecipeDraft.name}`);
+    persist(next); setEditRecipeId(null); setEditRecipeDraft(null); flash("Recipe updated");
+  };
+
   const ratesSupplier = db.suppliers.find(s => s.id === ratesSupplierId);
   const setPricing = (itemId, patch) => {
     const cur = (db.pricing && db.pricing[ratesSupplierId] && db.pricing[ratesSupplierId][itemId]) || { mode: "manual" };
@@ -1802,7 +1885,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     <div>
       <TopBar title="Admin" onBack={onBack} />
       <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
-        {["Items", "Suppliers", "Rates", "Kitchens", "Users", "Reset"].map(t => (
+        {["Items", "Suppliers", "Rates", "Kitchens", "Recipes", "Users", "Reset"].map(t => (
           <button key={t} onClick={() => setTab(t)} className={`flex-1 whitespace-nowrap py-2.5 px-3 rounded-xl text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
         ))}
       </div>
@@ -1979,6 +2062,72 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               );
             })}
             {(db.kitchens || []).length === 0 && <div className="text-sm text-[#8A9690]">No kitchens yet. Only branches with kitchens get a kitchen-selection step in Ending/Demand/Issue.</div>}
+          </React.Fragment>
+        )}
+        {tab === "Recipes" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <input className={numCls + " font-sans mb-2"} placeholder="Recipe name (e.g. Kabab Batch)" value={recipeName} onChange={e => setRecipeName(e.target.value)} />
+              <select className={selCls + " mb-3"} value={recipeBranch} onChange={e => setRecipeBranch(e.target.value)}>
+                <option value="">Any branch</option>
+                {BRANCHES.map(b => <option key={b}>{b}</option>)}
+              </select>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Uses (raw material)</div>
+              <div className="mb-3">
+                <RecipeItemList db={db} list={recipeConsumes}
+                  onAdd={() => addToRecipeList(setRecipeConsumes, recipeConsumes, recipeAddItemId, recipeAddQty, () => { setRecipeAddItemId(""); setRecipeAddQty(""); })}
+                  onRemove={(id) => setRecipeConsumes(recipeConsumes.filter(x => x.itemId !== id))}
+                  addItemId={recipeAddItemId} setAddItemId={setRecipeAddItemId} addQty={recipeAddQty} setAddQty={setRecipeAddQty} />
+              </div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Makes (finished items)</div>
+              <div className="mb-3">
+                <RecipeItemList db={db} list={recipeProduces}
+                  onAdd={() => addToRecipeList(setRecipeProduces, recipeProduces, recipeAddItemId2, recipeAddQty2, () => { setRecipeAddItemId2(""); setRecipeAddQty2(""); })}
+                  onRemove={(id) => setRecipeProduces(recipeProduces.filter(x => x.itemId !== id))}
+                  addItemId={recipeAddItemId2} setAddItemId={setRecipeAddItemId2} addQty={recipeAddQty2} setAddQty={setRecipeAddQty2} />
+              </div>
+              <button onClick={addRecipe} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Recipe</button>
+            </div>
+            {(db.recipes || []).map(r => (
+              editRecipeId === r.id ? (
+                <div key={r.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
+                  <input className={numCls + " font-sans mb-2"} value={editRecipeDraft.name} onChange={e => setEditRecipeDraft(d => ({ ...d, name: e.target.value }))} />
+                  <select className={selCls + " mb-3"} value={editRecipeDraft.branch} onChange={e => setEditRecipeDraft(d => ({ ...d, branch: e.target.value }))}>
+                    <option value="">Any branch</option>
+                    {BRANCHES.map(b => <option key={b}>{b}</option>)}
+                  </select>
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Uses (raw material)</div>
+                  <div className="mb-3">
+                    <RecipeItemList db={db} list={editRecipeDraft.consumes}
+                      onAdd={() => addToRecipeList(v => setEditRecipeDraft(d => ({ ...d, consumes: v })), editRecipeDraft.consumes, editAddItemId, editAddQty, () => { setEditAddItemId(""); setEditAddQty(""); })}
+                      onRemove={(id) => setEditRecipeDraft(d => ({ ...d, consumes: d.consumes.filter(x => x.itemId !== id) }))}
+                      addItemId={editAddItemId} setAddItemId={setEditAddItemId} addQty={editAddQty} setAddQty={setEditAddQty} />
+                  </div>
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Makes (finished items)</div>
+                  <div className="mb-3">
+                    <RecipeItemList db={db} list={editRecipeDraft.produces}
+                      onAdd={() => addToRecipeList(v => setEditRecipeDraft(d => ({ ...d, produces: v })), editRecipeDraft.produces, editAddItemId2, editAddQty2, () => { setEditAddItemId2(""); setEditAddQty2(""); })}
+                      onRemove={(id) => setEditRecipeDraft(d => ({ ...d, produces: d.produces.filter(x => x.itemId !== id) }))}
+                      addItemId={editAddItemId2} setAddItemId={setEditAddItemId2} addQty={editAddQty2} setAddQty={setEditAddQty2} />
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={saveEditRecipe} className="bg-[#2B6E63] text-white px-4 rounded-xl font-semibold">Save</button>
+                    <button onClick={() => { setEditRecipeId(null); setEditRecipeDraft(null); }} className="bg-[#F7F5F0] text-[#5C6B62] px-4 rounded-xl font-semibold">Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div key={r.id} className="bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm"><b>{r.name}</b> <span className="text-[#8A9690]">· {r.branch || "any branch"} · {r.consumes.length} used → {r.produces.length} made</span></span>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => startEditRecipe(r)} className="text-[#5C6B62]">✎</button>
+                      <button onClick={() => delRecipe(r.id)} className="text-[#B33A3A]">✕</button>
+                    </div>
+                  </div>
+                </div>
+              )
+            ))}
+            {(db.recipes || []).length === 0 && <div className="text-sm text-[#8A9690]">No recipes yet — add one above so Conversion has something to use.</div>}
           </React.Fragment>
         )}
         {tab === "Users" && (
