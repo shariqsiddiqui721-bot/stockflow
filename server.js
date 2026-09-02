@@ -1,6 +1,11 @@
 const express = require("express");
 const path = require("path");
 const { Pool } = require("pg");
+const webpush = require("web-push");
+
+const VAPID_PUBLIC_KEY = "BH5Tvcl3ie8t3JLf1bCGaRD7keOkjdGZ8v94HblObxmY-Mjbjq1Vfo-VQRisWmMpSgffKPJg6zHPoVeUJ_Cp7fU";
+const VAPID_PRIVATE_KEY = "DrPMA70J0WU9pPipHSNa9zkk0ZFqU75RP4k31aLVGEg";
+webpush.setVapidDetails("mailto:admin@stockflow.local", VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
@@ -16,137 +21,137 @@ const pool = new Pool({
 const SEED = {
   categories: ["Dumba", "Chicken", "Beef", "Ont", "Jhenga", "GS", "Masala", "Gulab Jamun", "Cocacola", "Next", "Water", "Dairy", "Coal", "Gas", "Vegetable", "Disposable", "BBQ", "KE North", "KE FOF", "KE FFH", "KE FK", "KE FW", "RENT North", "RENT FOF", "RENT FFH", "RENT FK"],
   items: [
-    { id: "i1", name: "Dumba", category: "Dumba", unit: "kg" },
-    { id: "i2", name: "Mutton", category: "Dumba", unit: "kg" },
-    { id: "i3", name: "Rosh", category: "Dumba", unit: "kg" },
-    { id: "i4", name: "Parda", category: "Dumba", unit: "kg" },
-    { id: "i5", name: "Chakki", category: "Dumba", unit: "kg" },
-    { id: "i6", name: "Kunna", category: "Dumba", unit: "kg" },
-    { id: "i7", name: "Biryani Chicken", category: "Chicken", unit: "kg" },
-    { id: "i8", name: "Karahi Chicken", category: "Chicken", unit: "kg" },
-    { id: "i9", name: "BBQ Boneless", category: "Chicken", unit: "kg" },
-    { id: "i10", name: "Handi Boneless", category: "Chicken", unit: "kg" },
-    { id: "i11", name: "Mandi Chicken", category: "Chicken", unit: "kg" },
-    { id: "i12", name: "Thai Boneless", category: "Chicken", unit: "kg" },
-    { id: "i13", name: "Tikka", category: "Chicken", unit: "kg" },
-    { id: "i14", name: "Tikka leg", category: "Chicken", unit: "kg" },
-    { id: "i15", name: "Tikka Chest", category: "Chicken", unit: "kg" },
-    { id: "i16", name: "Muqqadam", category: "Beef", unit: "kg" },
-    { id: "i17", name: "beef kabab", category: "Beef", unit: "kg" },
-    { id: "i18", name: "Beef biryani", category: "Beef", unit: "kg" },
-    { id: "i19", name: "Beef salan", category: "Beef", unit: "kg" },
-    { id: "i20", name: "Fat", category: "Beef", unit: "kg" },
-    { id: "i21", name: "Ont karhai", category: "Ont", unit: "kg" },
-    { id: "i22", name: "Ont BBQ", category: "Ont", unit: "kg" },
-    { id: "i23", name: "Jhenga", category: "Jhenga", unit: "kg" },
-    { id: "i24", name: "Oil", category: "GS", unit: "kg" },
-    { id: "i25", name: "ghee", category: "GS", unit: "kg" },
-    { id: "i26", name: "Meda", category: "GS", unit: "kg" },
-    { id: "i27", name: "fine", category: "GS", unit: "kg" },
-    { id: "i28", name: "Red atta", category: "GS", unit: "kg" },
-    { id: "i29", name: "Rice", category: "GS", unit: "kg" },
-    { id: "i30", name: "Salt", category: "GS", unit: "kg" },
-    { id: "i31", name: "Cream", category: "GS", unit: "piece" },
-    { id: "i32", name: "Mozerella", category: "GS", unit: "kg" },
-    { id: "i33", name: "happy cow", category: "GS", unit: "piece" },
-    { id: "i34", name: "cheese slice", category: "GS", unit: "piece" },
-    { id: "i35", name: "butter", category: "GS", unit: "piece" },
-    { id: "i36", name: "gulocos", category: "GS", unit: "kg" },
-    { id: "i37", name: "east", category: "GS", unit: "kg" },
-    { id: "i38", name: "soda", category: "GS", unit: "kg" },
-    { id: "i39", name: "cutter zeera", category: "Masala", unit: "kg" },
-    { id: "i40", name: "Phool", category: "Masala", unit: "kg" },
-    { id: "i41", name: "Aloo Bukhara", category: "Masala", unit: "kg" },
-    { id: "i42", name: "Zeera", category: "Masala", unit: "kg" },
-    { id: "i43", name: "kutti mirch", category: "Masala", unit: "kg" },
-    { id: "i44", name: "pisi mirch", category: "Masala", unit: "kg" },
-    { id: "i45", name: "Haldi", category: "Masala", unit: "kg" },
-    { id: "i46", name: "jayfal", category: "Masala", unit: "kg" },
-    { id: "i47", name: "javitri", category: "Masala", unit: "kg" },
-    { id: "i48", name: "choti ilaichi", category: "Masala", unit: "kg" },
-    { id: "i49", name: "bari ilaichi", category: "Masala", unit: "kg" },
-    { id: "i50", name: "long", category: "Masala", unit: "kg" },
-    { id: "i51", name: "Kali mirch", category: "Masala", unit: "kg" },
-    { id: "i52", name: "dar chini", category: "Masala", unit: "kg" },
-    { id: "i53", name: "sonf", category: "Masala", unit: "kg" },
-    { id: "i54", name: "zarda rang", category: "Masala", unit: "kg" },
-    { id: "i55", name: "Tezz Patta", category: "Masala", unit: "kg" },
-    { id: "i56", name: "khopra powder", category: "Masala", unit: "kg" },
-    { id: "i57", name: "Mandi box", category: "Masala", unit: "piece" },
-    { id: "i58", name: "kunna box", category: "Masala", unit: "piece" },
-    { id: "i59", name: "shan", category: "Masala", unit: "piece" },
-    { id: "i60", name: "dacni mirch", category: "Masala", unit: "kg" },
-    { id: "i61", name: "badian", category: "Masala", unit: "kg" },
-    { id: "i62", name: "gulab jamun", category: "Gulab Jamun", unit: "kg" },
-    { id: "i63", name: "Can coke", category: "Cocacola", unit: "piece" },
-    { id: "i64", name: "Buddy coke", category: "Cocacola", unit: "piece" },
-    { id: "i65", name: "Can Next", category: "Next", unit: "piece" },
-    { id: "i66", name: "buddy next", category: "Next", unit: "piece" },
-    { id: "i67", name: "Water small", category: "Water", unit: "piece" },
-    { id: "i68", name: "Water large", category: "Water", unit: "piece" },
-    { id: "i69", name: "Labor Water", category: "Water", unit: "piece" },
-    { id: "i70", name: "Kitchen Water", category: "Water", unit: "piece" },
-    { id: "i71", name: "dahi", category: "Dairy", unit: "kg" },
-    { id: "i72", name: "milk", category: "Dairy", unit: "kg" },
-    { id: "i73", name: "coal", category: "Coal", unit: "kg" },
-    { id: "i74", name: "gas machine", category: "Gas", unit: "kg" },
-    { id: "i75", name: "gas", category: "Gas", unit: "kg" },
-    { id: "i76", name: "Aloo", category: "Vegetable", unit: "kg" },
-    { id: "i77", name: "Piyaaz", category: "Vegetable", unit: "kg" },
-    { id: "i78", name: "tomato", category: "Vegetable", unit: "kg" },
-    { id: "i79", name: "Dhaniya", category: "Vegetable", unit: "piece" },
-    { id: "i80", name: "Podina", category: "Vegetable", unit: "piece" },
-    { id: "i81", name: "Adrak", category: "Vegetable", unit: "kg" },
-    { id: "i82", name: "Lehsan", category: "Vegetable", unit: "kg" },
-    { id: "i83", name: "Lemon", category: "Vegetable", unit: "kg" },
-    { id: "i84", name: "Moti Mirch", category: "Vegetable", unit: "kg" },
-    { id: "i85", name: "Hari Mirch", category: "Vegetable", unit: "kg" },
-    { id: "i86", name: "Kheera", category: "Vegetable", unit: "kg" },
-    { id: "i87", name: "papita", category: "Vegetable", unit: "kg" },
-    { id: "i88", name: "Chukandar", category: "Vegetable", unit: "kg" },
-    { id: "i89", name: "Gajjar", category: "Vegetable", unit: "kg" },
-    { id: "i90", name: "Kari patta", category: "Vegetable", unit: "kg" },
-    { id: "i91", name: "Shimla", category: "Vegetable", unit: "kg" },
-    { id: "i92", name: "glass", category: "Disposable", unit: "piece" },
-    { id: "i93", name: "book", category: "Disposable", unit: "kg" },
-    { id: "i94", name: "rubber band", category: "Disposable", unit: "piece" },
-    { id: "i95", name: "starow pipe", category: "Disposable", unit: "piece" },
-    { id: "i96", name: "R16", category: "Disposable", unit: "piece" },
-    { id: "i97", name: "R10", category: "Disposable", unit: "piece" },
-    { id: "i98", name: "1500 ML", category: "Disposable", unit: "piece" },
-    { id: "i99", name: "750 Ml", category: "Disposable", unit: "piece" },
-    { id: "i100", name: "HD shopper", category: "Disposable", unit: "piece" },
-    { id: "i101", name: "aluminium file", category: "Disposable", unit: "piece" },
-    { id: "i102", name: "14+18", category: "Disposable", unit: "piece" },
-    { id: "i103", name: "12+16", category: "Disposable", unit: "piece" },
-    { id: "i104", name: "10+14", category: "Disposable", unit: "piece" },
-    { id: "i105", name: "30+50", category: "Disposable", unit: "piece" },
-    { id: "i106", name: "gloves", category: "Disposable", unit: "piece" },
-    { id: "i107", name: "cling file", category: "Disposable", unit: "piece" },
-    { id: "i108", name: "mask", category: "Disposable", unit: "piece" },
-    { id: "i109", name: "toothpick", category: "Disposable", unit: "piece" },
-    { id: "i110", name: "Tissu", category: "Disposable", unit: "piece" },
-    { id: "i111", name: "safi", category: "Disposable", unit: "kg" },
-    { id: "i112", name: "room spary", category: "Disposable", unit: "piece" },
-    { id: "i113", name: "dastarkhwan", category: "Disposable", unit: "piece" },
-    { id: "i114", name: "printer Roll", category: "Disposable", unit: "piece" },
-    { id: "i115", name: "beef bihari boti", category: "BBQ", unit: "piece" },
-    { id: "i116", name: "Kabab beef", category: "BBQ", unit: "piece" },
-    { id: "i117", name: "chicken kabab", category: "BBQ", unit: "piece" },
-    { id: "i118", name: "malai boti", category: "BBQ", unit: "piece" },
-    { id: "i119", name: "leg tikka", category: "BBQ", unit: "piece" },
-    { id: "i120", name: "chest tikka", category: "BBQ", unit: "piece" },
-    { id: "i121", name: "dumba kabab", category: "BBQ", unit: "piece" },
-    { id: "i122", name: "KE North", category: "KE North", unit: "pm" },
-    { id: "i123", name: "KE FOF", category: "KE FOF", unit: "pm" },
-    { id: "i124", name: "KE FFH", category: "KE FFH", unit: "pm" },
-    { id: "i125", name: "KE FK", category: "KE FK", unit: "pm" },
-    { id: "i126", name: "KE FW", category: "KE FW", unit: "pm" },
-    { id: "i127", name: "RENT NORTH", category: "RENT North", unit: "pm" },
-    { id: "i128", name: "RENT FOF", category: "RENT FOF", unit: "pm" },
-    { id: "i129", name: "RENT FFH", category: "RENT FFH", unit: "pm" },
-    { id: "i130", name: "RENT FK", category: "RENT FK", unit: "pm" },
-    { id: "i131", name: "RENT FFH", category: "RENT FFH", unit: "pm" },
+    { id: "i1", name: "Dumba", nameUr: "دنبہ", category: "Dumba", unit: "kg" },
+    { id: "i2", name: "Mutton", nameUr: "مٹن", category: "Dumba", unit: "kg" },
+    { id: "i3", name: "Rosh", nameUr: "روش", category: "Dumba", unit: "kg" },
+    { id: "i4", name: "Parda", nameUr: "پردہ", category: "Dumba", unit: "kg" },
+    { id: "i5", name: "Chakki", nameUr: "چکی", category: "Dumba", unit: "kg" },
+    { id: "i6", name: "Kunna", nameUr: "کنہ", category: "Dumba", unit: "kg" },
+    { id: "i7", name: "Biryani Chicken", nameUr: "بریانی چکن", category: "Chicken", unit: "kg" },
+    { id: "i8", name: "Karahi Chicken", nameUr: "کڑاہی چکن", category: "Chicken", unit: "kg" },
+    { id: "i9", name: "BBQ Boneless", nameUr: "بی بی کیو بون لیس", category: "Chicken", unit: "kg" },
+    { id: "i10", name: "Handi Boneless", nameUr: "ہانڈی بون لیس", category: "Chicken", unit: "kg" },
+    { id: "i11", name: "Mandi Chicken", nameUr: "مانڈی چکن", category: "Chicken", unit: "kg" },
+    { id: "i12", name: "Thai Boneless", nameUr: "تھائی بون لیس", category: "Chicken", unit: "kg" },
+    { id: "i13", name: "Tikka", nameUr: "ٹکہ", category: "Chicken", unit: "kg" },
+    { id: "i14", name: "Tikka leg", nameUr: "ٹکہ لیگ", category: "Chicken", unit: "kg" },
+    { id: "i15", name: "Tikka Chest", nameUr: "ٹکہ چیسٹ", category: "Chicken", unit: "kg" },
+    { id: "i16", name: "Muqqadam", nameUr: "مقدم", category: "Beef", unit: "kg" },
+    { id: "i17", name: "beef kabab", nameUr: "بیف کباب", category: "Beef", unit: "kg" },
+    { id: "i18", name: "Beef biryani", nameUr: "بیف بریانی", category: "Beef", unit: "kg" },
+    { id: "i19", name: "Beef salan", nameUr: "بیف سالن", category: "Beef", unit: "kg" },
+    { id: "i20", name: "Fat", nameUr: "چربی", category: "Beef", unit: "kg" },
+    { id: "i21", name: "Ont karhai", nameUr: "اونٹ کڑاہی", category: "Ont", unit: "kg" },
+    { id: "i22", name: "Ont BBQ", nameUr: "اونٹ بی بی کیو", category: "Ont", unit: "kg" },
+    { id: "i23", name: "Jhenga", nameUr: "جھینگا", category: "Jhenga", unit: "kg" },
+    { id: "i24", name: "Oil", nameUr: "تیل", category: "GS", unit: "kg" },
+    { id: "i25", name: "ghee", nameUr: "گھی", category: "GS", unit: "kg" },
+    { id: "i26", name: "Meda", nameUr: "میدہ", category: "GS", unit: "kg" },
+    { id: "i27", name: "fine", nameUr: "باریک آٹا", category: "GS", unit: "kg" },
+    { id: "i28", name: "Red atta", nameUr: "لال آٹا", category: "GS", unit: "kg" },
+    { id: "i29", name: "Rice", nameUr: "چاول", category: "GS", unit: "kg" },
+    { id: "i30", name: "Salt", nameUr: "نمک", category: "GS", unit: "kg" },
+    { id: "i31", name: "Cream", nameUr: "کریم", category: "GS", unit: "piece" },
+    { id: "i32", name: "Mozerella", nameUr: "موزاریلا", category: "GS", unit: "kg" },
+    { id: "i33", name: "happy cow", nameUr: "ہیپی کاؤ", category: "GS", unit: "piece" },
+    { id: "i34", name: "cheese slice", nameUr: "چیز سلائس", category: "GS", unit: "piece" },
+    { id: "i35", name: "butter", nameUr: "مکھن", category: "GS", unit: "piece" },
+    { id: "i36", name: "gulocos", nameUr: "گلوکوز", category: "GS", unit: "kg" },
+    { id: "i37", name: "east", nameUr: "خمیر", category: "GS", unit: "kg" },
+    { id: "i38", name: "soda", nameUr: "سوڈا", category: "GS", unit: "kg" },
+    { id: "i39", name: "cutter zeera", nameUr: "کٹر زیرہ", category: "Masala", unit: "kg" },
+    { id: "i40", name: "Phool", nameUr: "پھول", category: "Masala", unit: "kg" },
+    { id: "i41", name: "Aloo Bukhara", nameUr: "آلو بخارا", category: "Masala", unit: "kg" },
+    { id: "i42", name: "Zeera", nameUr: "زیرہ", category: "Masala", unit: "kg" },
+    { id: "i43", name: "kutti mirch", nameUr: "کٹی مرچ", category: "Masala", unit: "kg" },
+    { id: "i44", name: "pisi mirch", nameUr: "پسی مرچ", category: "Masala", unit: "kg" },
+    { id: "i45", name: "Haldi", nameUr: "ہلدی", category: "Masala", unit: "kg" },
+    { id: "i46", name: "jayfal", nameUr: "جائفل", category: "Masala", unit: "kg" },
+    { id: "i47", name: "javitri", nameUr: "جاوتری", category: "Masala", unit: "kg" },
+    { id: "i48", name: "choti ilaichi", nameUr: "چھوٹی الائچی", category: "Masala", unit: "kg" },
+    { id: "i49", name: "bari ilaichi", nameUr: "بڑی الائچی", category: "Masala", unit: "kg" },
+    { id: "i50", name: "long", nameUr: "لونگ", category: "Masala", unit: "kg" },
+    { id: "i51", name: "Kali mirch", nameUr: "کالی مرچ", category: "Masala", unit: "kg" },
+    { id: "i52", name: "dar chini", nameUr: "دار چینی", category: "Masala", unit: "kg" },
+    { id: "i53", name: "sonf", nameUr: "سونف", category: "Masala", unit: "kg" },
+    { id: "i54", name: "zarda rang", nameUr: "زردہ رنگ", category: "Masala", unit: "kg" },
+    { id: "i55", name: "Tezz Patta", nameUr: "تیز پتہ", category: "Masala", unit: "kg" },
+    { id: "i56", name: "khopra powder", nameUr: "کھوپرا پاؤڈر", category: "Masala", unit: "kg" },
+    { id: "i57", name: "Mandi box", nameUr: "مانڈی باکس", category: "Masala", unit: "piece" },
+    { id: "i58", name: "kunna box", nameUr: "کنہ باکس", category: "Masala", unit: "piece" },
+    { id: "i59", name: "shan", nameUr: "شان مصالحہ", category: "Masala", unit: "piece" },
+    { id: "i60", name: "dacni mirch", nameUr: "دکنی مرچ", category: "Masala", unit: "kg" },
+    { id: "i61", name: "badian", nameUr: "بادیان", category: "Masala", unit: "kg" },
+    { id: "i62", name: "gulab jamun", nameUr: "گلاب جامن", category: "Gulab Jamun", unit: "kg" },
+    { id: "i63", name: "Can coke", nameUr: "کین کوک", category: "Cocacola", unit: "piece" },
+    { id: "i64", name: "Buddy coke", nameUr: "بڈی کوک", category: "Cocacola", unit: "piece" },
+    { id: "i65", name: "Can Next", nameUr: "کین نیکسٹ", category: "Next", unit: "piece" },
+    { id: "i66", name: "buddy next", nameUr: "بڈی نیکسٹ", category: "Next", unit: "piece" },
+    { id: "i67", name: "Water small", nameUr: "چھوٹی پانی کی بوتل", category: "Water", unit: "piece" },
+    { id: "i68", name: "Water large", nameUr: "بڑی پانی کی بوتل", category: "Water", unit: "piece" },
+    { id: "i69", name: "Labor Water", nameUr: "مزدور پانی", category: "Water", unit: "piece" },
+    { id: "i70", name: "Kitchen Water", nameUr: "کچن پانی", category: "Water", unit: "piece" },
+    { id: "i71", name: "dahi", nameUr: "دہی", category: "Dairy", unit: "kg" },
+    { id: "i72", name: "milk", nameUr: "دودھ", category: "Dairy", unit: "kg" },
+    { id: "i73", name: "coal", nameUr: "کوئلہ", category: "Coal", unit: "kg" },
+    { id: "i74", name: "gas machine", nameUr: "گیس مشین", category: "Gas", unit: "kg" },
+    { id: "i75", name: "gas", nameUr: "گیس", category: "Gas", unit: "kg" },
+    { id: "i76", name: "Aloo", nameUr: "آلو", category: "Vegetable", unit: "kg" },
+    { id: "i77", name: "Piyaaz", nameUr: "پیاز", category: "Vegetable", unit: "kg" },
+    { id: "i78", name: "tomato", nameUr: "ٹماٹر", category: "Vegetable", unit: "kg" },
+    { id: "i79", name: "Dhaniya", nameUr: "دھنیا", category: "Vegetable", unit: "piece" },
+    { id: "i80", name: "Podina", nameUr: "پودینہ", category: "Vegetable", unit: "piece" },
+    { id: "i81", name: "Adrak", nameUr: "ادرک", category: "Vegetable", unit: "kg" },
+    { id: "i82", name: "Lehsan", nameUr: "لہسن", category: "Vegetable", unit: "kg" },
+    { id: "i83", name: "Lemon", nameUr: "لیموں", category: "Vegetable", unit: "kg" },
+    { id: "i84", name: "Moti Mirch", nameUr: "موٹی مرچ", category: "Vegetable", unit: "kg" },
+    { id: "i85", name: "Hari Mirch", nameUr: "ہری مرچ", category: "Vegetable", unit: "kg" },
+    { id: "i86", name: "Kheera", nameUr: "کھیرا", category: "Vegetable", unit: "kg" },
+    { id: "i87", name: "papita", nameUr: "پپیتا", category: "Vegetable", unit: "kg" },
+    { id: "i88", name: "Chukandar", nameUr: "چقندر", category: "Vegetable", unit: "kg" },
+    { id: "i89", name: "Gajjar", nameUr: "گاجر", category: "Vegetable", unit: "kg" },
+    { id: "i90", name: "Kari patta", nameUr: "کڑی پتہ", category: "Vegetable", unit: "kg" },
+    { id: "i91", name: "Shimla", nameUr: "شملہ مرچ", category: "Vegetable", unit: "kg" },
+    { id: "i92", name: "glass", nameUr: "گلاس", category: "Disposable", unit: "piece" },
+    { id: "i93", name: "book", nameUr: "بک تھیلا", category: "Disposable", unit: "kg" },
+    { id: "i94", name: "rubber band", nameUr: "ربڑ بینڈ", category: "Disposable", unit: "piece" },
+    { id: "i95", name: "starow pipe", nameUr: "سٹرا پائپ", category: "Disposable", unit: "piece" },
+    { id: "i96", name: "R16", nameUr: "آر 16", category: "Disposable", unit: "piece" },
+    { id: "i97", name: "R10", nameUr: "آر 10", category: "Disposable", unit: "piece" },
+    { id: "i98", name: "1500 ML", nameUr: "1500 ایم ایل", category: "Disposable", unit: "piece" },
+    { id: "i99", name: "750 Ml", nameUr: "750 ایم ایل", category: "Disposable", unit: "piece" },
+    { id: "i100", name: "HD shopper", nameUr: "ایچ ڈی شاپر", category: "Disposable", unit: "piece" },
+    { id: "i101", name: "aluminium file", nameUr: "المونیم فوائل", category: "Disposable", unit: "piece" },
+    { id: "i102", name: "14+18", nameUr: "14+18", category: "Disposable", unit: "piece" },
+    { id: "i103", name: "12+16", nameUr: "12+16", category: "Disposable", unit: "piece" },
+    { id: "i104", name: "10+14", nameUr: "10+14", category: "Disposable", unit: "piece" },
+    { id: "i105", name: "30+50", nameUr: "30+50", category: "Disposable", unit: "piece" },
+    { id: "i106", name: "gloves", nameUr: "دستانے", category: "Disposable", unit: "piece" },
+    { id: "i107", name: "cling file", nameUr: "کلنگ فوائل", category: "Disposable", unit: "piece" },
+    { id: "i108", name: "mask", nameUr: "ماسک", category: "Disposable", unit: "piece" },
+    { id: "i109", name: "toothpick", nameUr: "ٹوتھ پک", category: "Disposable", unit: "piece" },
+    { id: "i110", name: "Tissu", nameUr: "ٹشو", category: "Disposable", unit: "piece" },
+    { id: "i111", name: "safi", nameUr: "صافی", category: "Disposable", unit: "kg" },
+    { id: "i112", name: "room spary", nameUr: "روم اسپرے", category: "Disposable", unit: "piece" },
+    { id: "i113", name: "dastarkhwan", nameUr: "دسترخوان", category: "Disposable", unit: "piece" },
+    { id: "i114", name: "printer Roll", nameUr: "پرنٹر رول", category: "Disposable", unit: "piece" },
+    { id: "i115", name: "beef bihari boti", nameUr: "بیف بہاری بوٹی", category: "BBQ", unit: "piece" },
+    { id: "i116", name: "Kabab beef", nameUr: "کباب بیف", category: "BBQ", unit: "piece" },
+    { id: "i117", name: "chicken kabab", nameUr: "چکن کباب", category: "BBQ", unit: "piece" },
+    { id: "i118", name: "malai boti", nameUr: "ملائی بوٹی", category: "BBQ", unit: "piece" },
+    { id: "i119", name: "leg tikka", nameUr: "لیگ ٹکہ", category: "BBQ", unit: "piece" },
+    { id: "i120", name: "chest tikka", nameUr: "چیسٹ ٹکہ", category: "BBQ", unit: "piece" },
+    { id: "i121", name: "dumba kabab", nameUr: "دنبہ کباب", category: "BBQ", unit: "piece" },
+    { id: "i122", name: "KE North", nameUr: "کے ای نارتھ", category: "KE North", unit: "pm" },
+    { id: "i123", name: "KE FOF", nameUr: "کے ای ایف او ایف", category: "KE FOF", unit: "pm" },
+    { id: "i124", name: "KE FFH", nameUr: "کے ای ایف ایف ایچ", category: "KE FFH", unit: "pm" },
+    { id: "i125", name: "KE FK", nameUr: "کے ای ایف کے", category: "KE FK", unit: "pm" },
+    { id: "i126", name: "KE FW", nameUr: "کے ای ایف ڈبلیو", category: "KE FW", unit: "pm" },
+    { id: "i127", name: "RENT NORTH", nameUr: "کرایہ نارتھ", category: "RENT North", unit: "pm" },
+    { id: "i128", name: "RENT FOF", nameUr: "کرایہ ایف او ایف", category: "RENT FOF", unit: "pm" },
+    { id: "i129", name: "RENT FFH", nameUr: "کرایہ ایف ایف ایچ", category: "RENT FFH", unit: "pm" },
+    { id: "i130", name: "RENT FK", nameUr: "کرایہ ایف کے", category: "RENT FK", unit: "pm" },
+    { id: "i131", name: "RENT FFH", nameUr: "کرایہ ایف ایف ایچ", category: "RENT FFH", unit: "pm" },
   ],
   suppliers: [
     { id: "s1", name: "Islam", itemIds: ["i1", "i2", "i3", "i4", "i5", "i6"] },
@@ -184,10 +189,20 @@ const SEED = {
     s2: { i1: { mode: "fixed", rate: 2300, cashOnly: false } },
   },
   todayRates: {},
+  kitchens: [
+    { id: "k1", name: "Kitchen 1", branch: "FB" },
+    { id: "k2", name: "Kitchen 2", branch: "FB" },
+    { id: "k3", name: "Kitchen 3", branch: "FB" },
+    { id: "k4", name: "Kitchen 4", branch: "FB" },
+    { id: "k5", name: "Kitchen 1", branch: "North" },
+    { id: "k6", name: "Kitchen 2", branch: "North" },
+    { id: "k7", name: "Kitchen 3", branch: "North" },
+    { id: "k8", name: "Kitchen 4", branch: "North" },
+  ],
   users: [
-    { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "ending", "demand", "adjustment", "payment", "reports", "admin"], branches: ["Store", "FB", "North"] },
-    { id: "u2", name: "Ahmed", pin: "2233", permissions: ["purchase", "issue", "reports"], branches: ["Store"] },
-    { id: "u3", name: "Bilal", pin: "3344", permissions: ["ending", "demand"], branches: ["FB", "North"] },
+    { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "payment", "reports", "admin"], branches: ["Store", "FB", "North", "BBQ"], kitchens: [], notifications: true },
+    { id: "u2", name: "Ahmed", pin: "2233", permissions: ["purchase", "issue", "receive", "reports"], branches: ["Store"], kitchens: [], notifications: true },
+    { id: "u3", name: "Bilal", pin: "3344", permissions: ["ending", "demand", "receive"], branches: ["FB", "North"], kitchens: [], notifications: true },
   ],
   purchases: [],
   issues: [],
@@ -195,6 +210,9 @@ const SEED = {
   demands: [],
   payments: [],
   adjustments: [],
+  demandAdjustments: [],
+  voidedDemandItems: [],
+  pushSubscriptions: {},
   log: [],
 };
 
@@ -235,6 +253,78 @@ app.post("/api/state", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to save data" });
+  }
+});
+
+// VAPID public key, needed by the browser to create a push subscription.
+app.get("/api/push/vapid-public-key", (req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY }));
+
+// Store a push subscription for a user (a user may have several devices).
+app.post("/api/push/subscribe", async (req, res) => {
+  try {
+    const { userId, subscription } = req.body;
+    if (!userId || !subscription) return res.status(400).json({ error: "userId and subscription required" });
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    data.pushSubscriptions = data.pushSubscriptions || {};
+    const list = data.pushSubscriptions[userId] || [];
+    const exists = list.some(s => s.endpoint === subscription.endpoint);
+    data.pushSubscriptions[userId] = exists ? list : [...list, subscription];
+    await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to subscribe" });
+  }
+});
+
+// Remove a push subscription (device unsubscribed or permission revoked).
+app.post("/api/push/unsubscribe", async (req, res) => {
+  try {
+    const { userId, endpoint } = req.body;
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    if (data.pushSubscriptions && data.pushSubscriptions[userId]) {
+      data.pushSubscriptions[userId] = data.pushSubscriptions[userId].filter(s => s.endpoint !== endpoint);
+    }
+    await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to unsubscribe" });
+  }
+});
+
+// Send a push notification to one or more users' registered devices.
+app.post("/api/push/send", async (req, res) => {
+  try {
+    const { userIds, title, body, url } = req.body;
+    if (!Array.isArray(userIds) || !title) return res.status(400).json({ error: "userIds and title required" });
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    data.pushSubscriptions = data.pushSubscriptions || {};
+    const payload = JSON.stringify({ title, body: body || "", url: url || "/" });
+    let changed = false;
+    for (const userId of userIds) {
+      const subs = data.pushSubscriptions[userId] || [];
+      const survivors = [];
+      for (const sub of subs) {
+        try {
+          await webpush.sendNotification(sub, payload);
+          survivors.push(sub);
+        } catch (err) {
+          // 404/410 = the subscription is gone (uninstalled, permission revoked, etc.) — drop it.
+          if (err.statusCode !== 404 && err.statusCode !== 410) survivors.push(sub);
+          else changed = true;
+        }
+      }
+      data.pushSubscriptions[userId] = survivors;
+    }
+    if (changed) await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to send notifications" });
   }
 });
 
