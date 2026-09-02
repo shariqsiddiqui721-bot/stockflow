@@ -21,7 +21,7 @@
 <script type="text/plain" id="app-source">
 const { useState, useEffect, useMemo, useCallback } = React;
 
-const BRANCHES = ["Store", "FB", "North"];
+const BRANCHES = ["Store", "FB", "North", "BBQ"];
 const ALL_PERMISSIONS = ["purchase", "issue", "receive", "ending", "demand", "adjustment", "payment", "reports", "admin"];
 const uid = (p) => p + Math.random().toString(36).slice(2, 9);
 // Business day runs 9:00 AM to 6:00 AM the next calendar day.
@@ -468,8 +468,10 @@ function MainMenu({ db, session, persist, onLogout, setScreen }) {
 /* ---------- Purchase ---------- */
 
 function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const [supplierId, setSupplierId] = useState(db.suppliers[0]?.id || "");
   const [category, setCategory] = useState("");
+  const [cashBranch, setCashBranch] = useState(myBranches[0]);
   const [rows, setRows] = useState({}); // itemId -> { qty, rate }
   const [payMode, setPayMode] = useState("credit");
   const [todayInputs, setTodayInputs] = useState({}); // category -> value
@@ -546,7 +548,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
     if (categoriesNeedingToday.length > 0) { flash("Set today's rate for: " + categoriesNeedingToday.join(", "), "error"); return; }
     const recs = entries.map(([itemId, r]) => {
       const qty = Number(r.qty), rate = Number(r.rate);
-      return { id: uid("p"), date: todayStr(), itemId, supplierId, qty, rate, amount: qty * rate, paymentMode: payMode, userId: session.id };
+      return { id: uid("p"), date: todayStr(), itemId, supplierId, qty, rate, amount: qty * rate, paymentMode: payMode, branch: payMode === "cash" ? cashBranch : null, userId: session.id };
     });
     const next = { ...db, purchases: [...recs, ...db.purchases] };
     addLog(next, "Purchase", `${supplier.name}: ${recs.length} item(s), bill ${money(total)} (${payMode})`);
@@ -581,12 +583,19 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
         </Field>
 
         {payMode === "cash" && (
-          <Field label="Category">
-            <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>
-              <option value="">Select a category…</option>
-              {db.categories.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </Field>
+          <React.Fragment>
+            <Field label="Branch (for cash material)">
+              <select className={selCls} value={cashBranch} onChange={e => setCashBranch(e.target.value)}>
+                {myBranches.map(b => <option key={b}>{b}</option>)}
+              </select>
+            </Field>
+            <Field label="Category">
+              <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>
+                <option value="">Select a category…</option>
+                {db.categories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </Field>
+          </React.Fragment>
         )}
 
         {formulaCategories.map(cat => {
@@ -1015,7 +1024,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Activity Log"];
 
 function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf, onBack }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
@@ -1226,16 +1235,52 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             ))}
           </ReportTable>
         )}
+        {tab === "Cash Material" && (() => {
+          const cashPurchases = db.purchases.filter(p => p.paymentMode === "cash" && itemName(p.itemId).toLowerCase().includes(q.toLowerCase()) && (!dateFilter || p.date === dateFilter));
+          const byBranch = myBranches.map(b => ({ branch: b, list: cashPurchases.filter(p => (p.branch || "Store") === b) })).filter(g => g.list.length > 0);
+          const grandTotal = cashPurchases.reduce((a, p) => a + p.amount, 0);
+          return (
+            <ReportTable
+              title={dateFilter ? `Cash Material — ${dateFilter}` : "Cash Material — All Dates"}
+              onExport={() => downloadCSV("cash-material.csv", toCSV(cashPurchases, [
+                { label: "Date", get: p => p.date }, { label: "Branch", get: p => p.branch || "Store" }, { label: "Item", get: p => itemName(p.itemId) },
+                { label: "Qty", get: p => p.qty }, { label: "Rate", get: p => p.rate }, { label: "Amount", get: p => p.amount },
+              ]))}
+            >
+              {byBranch.length === 0 && <div className="text-sm text-[#8A9690]">No cash purchases{dateFilter ? " on this date" : ""}.</div>}
+              {byBranch.map(g => (
+                <div key={g.branch} className="mb-3 last:mb-0">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">{g.branch}</div>
+                  {g.list.map(p => (
+                    <div key={p.id} className="flex justify-between items-center py-1.5 border-t border-[#EFEBDF] first:border-t-0">
+                      <div>
+                        <div className="text-sm font-medium">{itemName(p.itemId)}</div>
+                        <div className="text-[11px] text-[#8A9690]">{p.date} · {p.qty} × {p.rate}</div>
+                      </div>
+                      <div className="font-mono font-bold text-sm">{money(p.amount)}</div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {byBranch.length > 0 && (
+                <div className="flex justify-between pt-2 mt-1 border-t-2 border-[#1F2A24] font-bold text-sm">
+                  <span>Grand Total</span>
+                  <span className="font-mono">{money(grandTotal)}</span>
+                </div>
+              )}
+            </ReportTable>
+          );
+        })()}
         {tab === "Supplier Ledger" && (
           <React.Fragment>
             <select className={selCls + " mb-3"} value={ledgerSupplierId} onChange={e => setLedgerSupplierId(e.target.value)}>
               {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
             {ledgerSupplier && (() => {
-              const purchaseTx = db.purchases.filter(p => p.supplierId === ledgerSupplierId).map(p => ({
+              const purchaseTx = db.purchases.filter(p => p.supplierId === ledgerSupplierId && p.paymentMode !== "cash").map(p => ({
                 date: p.date, type: "Purchase",
-                desc: `${itemName(p.itemId)} — ${p.qty} × ${p.rate}${p.paymentMode === "cash" ? " (cash)" : ""}`,
-                amount: p.paymentMode === "cash" ? 0 : p.amount,
+                desc: `${itemName(p.itemId)} — ${p.qty} × ${p.rate}`,
+                amount: p.amount,
               }));
               const paymentTx = (db.payments || []).filter(x => x.supplierId === ledgerSupplierId).map(x => ({
                 date: x.date, type: "Payment", desc: x.note || "Payment", amount: -x.amount,
@@ -1245,7 +1290,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                 .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
               let running = 0;
               const withBalance = allTx.map(t => { running += t.amount; return { ...t, balance: running }; });
-              const totalPurchases = db.purchases.filter(p => p.supplierId === ledgerSupplierId).reduce((a, p) => a + p.amount, 0);
+              const totalPurchases = db.purchases.filter(p => p.supplierId === ledgerSupplierId && p.paymentMode !== "cash").reduce((a, p) => a + p.amount, 0);
               const totalPaid = (db.payments || []).filter(x => x.supplierId === ledgerSupplierId).reduce((a, x) => a + x.amount, 0);
               const bal = balanceOf(ledgerSupplierId);
               return (
