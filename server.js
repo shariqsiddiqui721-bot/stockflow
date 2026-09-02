@@ -199,6 +199,7 @@ const SEED = {
     { id: "k7", name: "Kitchen 3", branch: "North" },
     { id: "k8", name: "Kitchen 4", branch: "North" },
   ],
+  recipes: [],
   users: [
     { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "payment", "reports", "admin"], branches: ["Store", "FB", "North", "BBQ"], kitchens: [], notifications: true },
     { id: "u2", name: "Ahmed", pin: "2233", permissions: ["purchase", "issue", "receive", "reports"], branches: ["Store"], kitchens: [], notifications: true },
