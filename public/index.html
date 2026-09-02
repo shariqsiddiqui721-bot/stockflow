@@ -22,7 +22,7 @@
 const { useState, useEffect, useMemo, useCallback } = React;
 
 const BRANCHES = ["Store", "FB", "North", "BBQ"];
-const ALL_PERMISSIONS = ["purchase", "issue", "receive", "ending", "demand", "adjustment", "payment", "reports", "admin"];
+const ALL_PERMISSIONS = ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "payment", "reports", "admin"];
 const uid = (p) => p + Math.random().toString(36).slice(2, 9);
 // Business day runs 9:00 AM to 6:00 AM the next calendar day.
 // Anything before 9 AM still counts as "yesterday's" business date.
@@ -336,6 +336,7 @@ function App() {
       {screen === "ending" && <EndingScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "demand" && <DemandScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "adjustment" && <AdjustmentScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "conversion" && <ConversionScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "receive" && <ConfirmReceiptScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "payment" && <PaymentScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "reports" && <ReportsScreen {...commonProps} onBack={() => setScreen("menu")} />}
@@ -403,6 +404,7 @@ function MainMenu({ db, session, persist, onLogout, setScreen }) {
     { key: "ending", label: "Ending", sub: "Closing count", emoji: "📋", color: "#4A6FA5" },
     { key: "demand", label: "Demand", sub: "Request items", emoji: "🧾", color: "#B3562C" },
     { key: "adjustment", label: "Adjustment", sub: "Wastage / theft", emoji: "⚖️", color: "#8A4A4A" },
+    { key: "conversion", label: "Conversion", sub: "Raw \u2192 finished items", emoji: "🍢", color: "#B3562C" },
     { key: "payment", label: "Payment", sub: "Pay suppliers", emoji: "💰", color: "#7A5C2E" },
   ].filter(t => perms.includes(t.key));
 
@@ -841,6 +843,67 @@ function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone
         </div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} stockCheck={(id) => stockOf(branch, id)} /></div>
         <button className={btnPrimary} onClick={save}>Save Adjustment</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Conversion (raw material -> finished items, e.g. BBQ station) ---------- */
+
+function ConversionScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const [branch, setBranch] = useState(myBranches[0]);
+  const [usedCategory, setUsedCategory] = useState(db.categories[0]);
+  const [madeCategory, setMadeCategory] = useState(db.categories[0]);
+  const [note, setNote] = useState("");
+  const [usedValues, setUsedValues] = useState({});
+  const [madeValues, setMadeValues] = useState({});
+  const usedItems = db.items.filter(i => i.category === usedCategory);
+  const madeItems = db.items.filter(i => i.category === madeCategory);
+  useEffect(() => { setUsedValues({}); }, [usedCategory, branch]);
+  useEffect(() => { setMadeValues({}); }, [madeCategory, branch]);
+  const usedEntries = Object.entries(usedValues).filter(([, v]) => Number(v) > 0);
+  const madeEntries = Object.entries(madeValues).filter(([, v]) => Number(v) > 0);
+
+  const save = () => {
+    if (usedEntries.length === 0 || madeEntries.length === 0) { flash("Enter what was used and what was made", "error"); return; }
+    const usedRecs = usedEntries.map(([itemId, v]) => ({
+      id: uid("adj"), date: todayStr(), branch, itemId, qty: -Math.abs(Number(v)),
+      kind: "conversion", reason: `Used to make: ${madeEntries.map(([mid, mv]) => `${mv} ${db.items.find(i => i.id === mid)?.name}`).join(", ")}${note ? " — " + note : ""}`,
+      userId: session.id,
+    }));
+    const madeRecs = madeEntries.map(([itemId, v]) => ({
+      id: uid("adj"), date: todayStr(), branch, itemId, qty: Math.abs(Number(v)),
+      kind: "conversion", reason: `Made from: ${usedEntries.map(([uid_, uv]) => `${uv} ${db.items.find(i => i.id === uid_)?.name}`).join(", ")}${note ? " — " + note : ""}`,
+      userId: session.id,
+    }));
+    const next = { ...db, adjustments: [...usedRecs, ...madeRecs, ...(db.adjustments || [])] };
+    addLog(next, "Conversion", `${branch}: used ${usedEntries.length} item(s), made ${madeEntries.length} item(s)${note ? " — " + note : ""}`);
+    persist(next);
+    notifyUsers(adminRecipients(db), "Conversion Recorded", `${branch}: ${usedEntries.map(([id, v]) => `${v} ${db.items.find(i => i.id === id)?.name}`).join(", ")} → ${madeEntries.map(([id, v]) => `${v} ${db.items.find(i => i.id === id)?.name}`).join(", ")}`);
+    flash("Conversion saved"); setUsedValues({}); setMadeValues({}); setNote("");
+  };
+
+  return (
+    <div>
+      <TopBar title="Conversion" onBack={onDone} />
+      <div className="p-5">
+        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
+
+        <div className="text-sm font-bold text-[#1F2A24] mb-1.5">Raw Material Used</div>
+        <Field label="Category"><select className={selCls} value={usedCategory} onChange={e => setUsedCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <div className="mb-5"><ItemQtyGrid items={usedItems} values={usedValues} setValues={setUsedValues} stockCheck={(id) => stockOf(branch, id)} /></div>
+
+        <div className="text-sm font-bold text-[#1F2A24] mb-1.5">Items Made</div>
+        <Field label="Category"><select className={selCls} value={madeCategory} onChange={e => setMadeCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <div className="mb-5"><ItemQtyGrid items={madeItems} values={madeValues} setValues={setMadeValues} /></div>
+
+        <Field label="Note (optional)">
+          <input className={numCls + " font-sans"} value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. evening batch" />
+        </Field>
+
+        <div className="text-[11px] text-[#8A9690] mb-4">Raw material is deducted and finished items are added to {branch}'s stock. Both show up in Reports → Adjustments, tagged "conversion".</div>
+        <button className={btnPrimary} onClick={save}>Save Conversion</button>
       </div>
     </div>
   );
