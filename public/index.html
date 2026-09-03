@@ -22,7 +22,7 @@
 const { useState, useEffect, useMemo, useCallback } = React;
 
 const BRANCHES = ["Store", "FB", "North", "BBQ"];
-const ALL_PERMISSIONS = ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "payment", "reports", "admin"];
+const ALL_PERMISSIONS = ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "labor", "review", "payment", "reports", "admin"];
 const uid = (p) => p + Math.random().toString(36).slice(2, 9);
 // Business day runs 9:00 AM to 6:00 AM the next calendar day.
 // Anything before 9 AM still counts as "yesterday's" business date.
@@ -252,6 +252,18 @@ function myKitchensFor(db, session, branch) {
   return branchKitchens.filter(k => session.kitchens.includes(k.id));
 }
 
+// Items a user is allowed to work with, everywhere in the app. Empty session.itemIds = no restriction.
+function itemsForUser(db, session, items) {
+  if (!session.itemIds || session.itemIds.length === 0) return items;
+  return items.filter(i => session.itemIds.includes(i.id));
+}
+// Categories that still have at least one item visible to this user, given an optional kitchen restriction too.
+function categoriesForUser(db, session, kitchenItemIds) {
+  const allowed = itemsForUser(db, session, db.items).filter(i => !kitchenItemIds || kitchenItemIds.includes(i.id));
+  const cats = [...new Set(allowed.map(i => i.category))];
+  return db.categories.filter(c => cats.includes(c));
+}
+
 function KitchenChips({ kitchens, selected, onToggle }) {
   return (
     <div className="flex flex-wrap gap-1.5">
@@ -261,6 +273,31 @@ function KitchenChips({ kitchens, selected, onToggle }) {
           {k.name}
         </button>
       ))}
+    </div>
+  );
+}
+
+// Restricts a user to whole categories at a time (tap a category to select/deselect every item in it).
+// selected = the user's itemIds array; onSetItemIds replaces it wholesale.
+function UserCategoryItemPicker({ db, selectedItemIds, onSetItemIds }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {db.categories.map(cat => {
+        const catItems = db.items.filter(i => i.category === cat).map(i => i.id);
+        const selectedCount = catItems.filter(id => selectedItemIds.includes(id)).length;
+        const full = selectedCount === catItems.length;
+        const partial = selectedCount > 0 && !full;
+        return (
+          <button key={cat} type="button"
+            onClick={() => {
+              if (full) onSetItemIds(selectedItemIds.filter(id => !catItems.includes(id)));
+              else onSetItemIds([...new Set([...selectedItemIds, ...catItems])]);
+            }}
+            className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${full ? "bg-[#2B6E63] text-white border-[#2B6E63]" : partial ? "bg-[#FBF0DD] border-[#C98A2C] text-[#7A5C2E]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>
+            {cat}{partial ? ` (${selectedCount}/${catItems.length})` : ""}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -293,7 +330,7 @@ function App() {
 
   const stockOf = useMemo(() => (branch, itemId, asOfDate) => {
     if (!db) return 0;
-    let qty = 0;
+    let qty = Number(db.openingStock?.[branch]?.[itemId] || 0);
     if (branch === "Store") db.purchases.forEach(p => { if (p.itemId === itemId && (!asOfDate || p.date <= asOfDate)) qty += Number(p.qty); });
     db.issues.forEach(iss => {
       if (iss.itemId !== itemId) return;
@@ -311,9 +348,11 @@ function App() {
 
   const balanceOf = useMemo(() => (supplierId) => {
     if (!db) return 0;
+    const supplier = db.suppliers.find(s => s.id === supplierId);
+    const opening = Number(supplier?.openingBalance || 0);
     const owed = db.purchases.filter(p => p.supplierId === supplierId && p.paymentMode === "credit").reduce((a, p) => a + p.amount, 0);
     const paid = (db.payments || []).filter(x => x.supplierId === supplierId).reduce((a, x) => a + x.amount, 0);
-    return owed - paid;
+    return opening + owed - paid;
   }, [db]);
 
   const lastBillOf = useMemo(() => (supplierId) => {
@@ -337,6 +376,8 @@ function App() {
       {screen === "demand" && <DemandScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "adjustment" && <AdjustmentScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "conversion" && <ConversionScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "labor" && <LaborScreen {...commonProps} onDone={() => setScreen("menu")} />}
+      {screen === "review" && <CustomerReviewScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "receive" && <ConfirmReceiptScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "payment" && <PaymentScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "reports" && <ReportsScreen {...commonProps} onBack={() => setScreen("menu")} />}
@@ -405,6 +446,8 @@ function MainMenu({ db, session, persist, onLogout, setScreen }) {
     { key: "demand", label: "Demand", sub: "Request items", emoji: "🧾", color: "#B3562C" },
     { key: "adjustment", label: "Adjustment", sub: "Wastage / theft", emoji: "⚖️", color: "#8A4A4A" },
     { key: "conversion", label: "Conversion", sub: "Raw \u2192 finished items", emoji: "🍢", color: "#B3562C" },
+    { key: "labor", label: "Labor", sub: "Attendance & wages", emoji: "👷", color: "#4A6FA5" },
+    { key: "review", label: "Customer Review", sub: "Collect feedback", emoji: "⭐", color: "#C98A2C" },
     { key: "payment", label: "Payment", sub: "Pay suppliers", emoji: "💰", color: "#7A5C2E" },
   ].filter(t => perms.includes(t.key));
 
@@ -479,10 +522,11 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
   const [todayInputs, setTodayInputs] = useState({}); // category -> value
 
   const supplier = db.suppliers.find(s => s.id === supplierId);
-  const supplierItems = supplier ? db.items.filter(i => supplier.itemIds.includes(i.id)) : [];
+  const supplierItems = itemsForUser(db, session, supplier ? db.items.filter(i => supplier.itemIds.includes(i.id)) : []);
   const supplierCats = [...new Set(supplierItems.map(i => i.category))];
+  const cashCategories = categoriesForUser(db, session, null);
   const visibleItems = payMode === "cash"
-    ? (category ? db.items.filter(i => i.category === category) : [])
+    ? (category ? itemsForUser(db, session, db.items.filter(i => i.category === category)) : [])
     : (category ? supplierItems.filter(i => i.category === category) : supplierItems);
 
   useEffect(() => { setRows({}); setCategory(""); }, [supplierId, payMode]);
@@ -594,7 +638,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
             <Field label="Category">
               <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>
                 <option value="">Select a category…</option>
-                {db.categories.map(c => <option key={c} value={c}>{c}</option>)}
+                {cashCategories.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </Field>
           </React.Fragment>
@@ -722,9 +766,10 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
   const [to, setTo] = useState(BRANCHES.find(b => b !== myBranches[0]) || BRANCHES[1]);
   const toKitchens = kitchensOf(db, to);
   const [kitchenId, setKitchenId] = useState("");
-  const [category, setCategory] = useState(db.categories[0]);
+  const myCategories = categoriesForUser(db, session, null);
+  const [category, setCategory] = useState(myCategories[0] || db.categories[0]);
   const [values, setValues] = useState({});
-  const items = db.items.filter(i => i.category === category);
+  const items = itemsForUser(db, session, db.items.filter(i => i.category === category));
   useEffect(() => { setValues({}); }, [category, from, to, kitchenId]);
   useEffect(() => { setKitchenId(""); }, [to]);
   const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
@@ -759,7 +804,7 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
             </select>
           </Field>
         )}
-        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{myCategories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Items & Quantity</div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} stockCheck={(id) => stockOf(from, id)} /></div>
         <button className={btnPrimary} onClick={save}>Save Issue</button>
@@ -775,11 +820,13 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
   const [branch, setBranch] = useState(myBranches[0]);
   const myKitchens = myKitchensFor(db, session, branch);
   const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
-  const [category, setCategory] = useState(db.categories[0]);
-  const [values, setValues] = useState({});
   const activeKitchen = myKitchens.find(k => k.id === kitchenId);
   const kitchenItemIds = activeKitchen && activeKitchen.itemIds && activeKitchen.itemIds.length ? activeKitchen.itemIds : null;
-  const items = db.items.filter(i => i.category === category && (!kitchenItemIds || kitchenItemIds.includes(i.id)));
+  const myCategories = categoriesForUser(db, session, kitchenItemIds);
+  const [category, setCategory] = useState(myCategories[0] || db.categories[0]);
+  useEffect(() => { if (!myCategories.includes(category)) setCategory(myCategories[0] || ""); }, [kitchenId, branch]);
+  const [values, setValues] = useState({});
+  const items = itemsForUser(db, session, db.items.filter(i => i.category === category && (!kitchenItemIds || kitchenItemIds.includes(i.id))));
   useEffect(() => { setValues({}); }, [category, branch, kitchenId]);
   useEffect(() => { setKitchenId(myKitchensFor(db, session, branch)[0]?.id || ""); }, [branch]);
   const entries = Object.entries(values).filter(([, v]) => v !== "" && v !== undefined);
@@ -808,7 +855,7 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
             </select>
           </Field>
         )}
-        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{myCategories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Closing Count</div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
         <button className={btnPrimary} onClick={save}>Save Ending</button>
@@ -822,11 +869,12 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
 function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const [branch, setBranch] = useState(myBranches[0]);
-  const [category, setCategory] = useState(db.categories[0]);
+  const myCategories = categoriesForUser(db, session, null);
+  const [category, setCategory] = useState(myCategories[0] || db.categories[0]);
   const [kind, setKind] = useState("wastage"); // wastage | theft | damage | found
   const [reason, setReason] = useState("");
   const [values, setValues] = useState({}); // itemId -> qty (always entered positive, sign applied on save)
-  const items = db.items.filter(i => i.category === category);
+  const items = itemsForUser(db, session, db.items.filter(i => i.category === category));
   useEffect(() => { setValues({}); }, [category, branch]);
   const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
   const isLoss = kind !== "found";
@@ -860,7 +908,7 @@ function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone
         <Field label="Note (optional)">
           <input className={numCls + " font-sans"} value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. spoiled overnight" />
         </Field>
-        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{myCategories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">
           {isLoss ? "Quantity Lost" : "Quantity Found"}
         </div>
@@ -956,6 +1004,156 @@ function ConversionScreen({ db, session, persist, addLog, flash, stockOf, onDone
   );
 }
 
+/* ---------- Labor (attendance + daily wage) ---------- */
+
+function LaborScreen({ db, session, persist, addLog, flash, onDone }) {
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const [branch, setBranch] = useState(myBranches[0]);
+  const [date, setDate] = useState(todayStr());
+  const laborsHere = (db.labors || []).filter(l => l.active !== false && (!l.branch || l.branch === branch));
+  const [statusDraft, setStatusDraft] = useState({}); // laborId -> status
+  const [payOpenFor, setPayOpenFor] = useState(null);
+  const [payAmount, setPayAmount] = useState("");
+  const [payNote, setPayNote] = useState("");
+
+  const statusFor = (laborId) => {
+    if (statusDraft[laborId]) return statusDraft[laborId];
+    const existing = (db.attendance || []).find(a => a.laborId === laborId && a.date === date);
+    return existing?.status || "";
+  };
+
+  const setStatus = (laborId, status) => setStatusDraft(d => ({ ...d, [laborId]: status }));
+
+  const saveAttendance = () => {
+    const toSave = Object.entries(statusDraft).filter(([, v]) => v);
+    if (toSave.length === 0) { flash("Mark at least one person's attendance", "error"); return; }
+    let next = { ...db };
+    toSave.forEach(([laborId, status]) => {
+      const existingIdx = (next.attendance || []).findIndex(a => a.laborId === laborId && a.date === date);
+      const rec = { id: existingIdx >= 0 ? next.attendance[existingIdx].id : uid("att"), date, laborId, branch, status, userId: session.id };
+      if (existingIdx >= 0) {
+        next.attendance = next.attendance.map((a, i) => i === existingIdx ? rec : a);
+      } else {
+        next.attendance = [rec, ...(next.attendance || [])];
+      }
+    });
+    addLog(next, "Attendance", `${branch} ${date}: ${toSave.length} marked`);
+    persist(next); flash("Attendance saved"); setStatusDraft({});
+  };
+
+  const savePayment = (laborId) => {
+    const amt = Number(payAmount);
+    if (!amt || amt <= 0) { flash("Enter a valid amount", "error"); return; }
+    const rec = { id: uid("lpay"), date, laborId, amount: amt, note: payNote.trim(), userId: session.id };
+    const next = { ...db, laborPayments: [rec, ...(db.laborPayments || [])] };
+    const labor = (db.labors || []).find(l => l.id === laborId);
+    addLog(next, "Labor Payment", `Paid ${money(amt)} to ${labor?.name}`);
+    persist(next); setPayOpenFor(null); setPayAmount(""); setPayNote(""); flash("Payment saved");
+  };
+
+  return (
+    <div>
+      <TopBar title="Labor" onBack={onDone} />
+      <div className="p-5">
+        <div className="grid grid-cols-2 gap-3 mb-2">
+          <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
+          <Field label="Date"><input type="date" className={selCls} value={date} onChange={e => setDate(e.target.value)} /></Field>
+        </div>
+
+        {laborsHere.length === 0 && <div className="text-sm text-[#8A9690] mb-4">No labor set up for {branch} — add them in Admin &gt; Labor.</div>}
+
+        {laborsHere.map(l => {
+          const st = statusFor(l.id);
+          return (
+            <div key={l.id} className="bg-white rounded-xl p-3 border-2 border-[#EAE4D4] mb-3">
+              <div className="flex justify-between items-center mb-2">
+                <div className="font-semibold text-[#1F2A24]">{l.name}</div>
+                <div className="text-xs text-[#8A9690] font-mono">{money(l.dailyWage)}/day</div>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5 mb-2">
+                {["present", "late", "absent"].map(s => (
+                  <button key={s} onClick={() => setStatus(l.id, s)} className={`py-2 rounded-lg text-xs font-semibold capitalize border-2 ${st === s ? (s === "absent" ? "bg-[#B33A3A] text-white border-[#B33A3A]" : s === "late" ? "bg-[#C98A2C] text-white border-[#C98A2C]" : "bg-[#2B6E63] text-white border-[#2B6E63]") : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>{s}</button>
+                ))}
+              </div>
+              {payOpenFor !== l.id ? (
+                <button onClick={() => { setPayOpenFor(l.id); setPayAmount(""); setPayNote(""); }} className="text-xs font-semibold text-[#4A6FA5] bg-[#4A6FA5]/10 px-3 py-1.5 rounded-full">+ Record Payment</button>
+              ) : (
+                <div className="flex gap-2 mt-1">
+                  <input className={numCls} type="number" placeholder="Amount" value={payAmount} onChange={e => setPayAmount(e.target.value)} />
+                  <input className={numCls + " font-sans"} placeholder="Note" value={payNote} onChange={e => setPayNote(e.target.value)} />
+                  <button onClick={() => savePayment(l.id)} className="bg-[#C98A2C] text-white px-3 rounded-xl font-semibold whitespace-nowrap">Save</button>
+                  <button onClick={() => setPayOpenFor(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-3 rounded-xl font-semibold">✕</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {laborsHere.length > 0 && <button className={btnPrimary} onClick={saveAttendance}>Save Attendance</button>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Customer Review ---------- */
+
+const REVIEW_OPTIONS = [
+  { key: "very_bad", label: "Very Bad", emoji: "😠", color: "#B33A3A" },
+  { key: "bad", label: "Bad", emoji: "🙁", color: "#B3562C" },
+  { key: "good", label: "Good", emoji: "🙂", color: "#C98A2C" },
+  { key: "very_good", label: "Very Good", emoji: "😃", color: "#2B6E63" },
+  { key: "awesome", label: "Awesome", emoji: "🤩", color: "#1F2A24" },
+];
+
+function CustomerReviewScreen({ db, session, persist, addLog, flash, onDone }) {
+  const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const [branch, setBranch] = useState(myBranches[0]);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [rating, setRating] = useState("");
+  const [comments, setComments] = useState("");
+
+  const save = () => {
+    if (!rating) { flash("Pick a review rating", "error"); return; }
+    const rec = { id: uid("rev"), date: todayStr(), branch, name: name.trim(), phone: phone.trim(), rating, comments: comments.trim(), userId: session.id };
+    const next = { ...db, customerReviews: [rec, ...(db.customerReviews || [])] };
+    addLog(next, "Customer Review", `${branch}: ${REVIEW_OPTIONS.find(r => r.key === rating)?.label}${name ? " — " + name : ""}`);
+    persist(next);
+    notifyUsers(adminRecipients(db), "New Customer Review", `${REVIEW_OPTIONS.find(r => r.key === rating)?.label} at ${branch}${name ? " — " + name : ""}`);
+    flash("Review saved"); setName(""); setPhone(""); setRating(""); setComments("");
+  };
+
+  return (
+    <div>
+      <TopBar title="Customer Review" onBack={onDone} />
+      <div className="p-5">
+        <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
+        <Field label="Customer Name (optional)">
+          <input className={numCls + " font-sans"} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Ahmed Khan" />
+        </Field>
+        <Field label="Contact Number (optional, for WhatsApp)">
+          <input className={numCls} type="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="03xx-xxxxxxx" />
+        </Field>
+        <Field label="How was their experience?">
+          <div className="grid grid-cols-1 gap-2">
+            {REVIEW_OPTIONS.map(r => (
+              <button key={r.key} onClick={() => setRating(r.key)}
+                className={`flex items-center gap-3 py-3 px-4 rounded-xl font-semibold border-2 text-left ${rating === r.key ? "text-white" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}
+                style={rating === r.key ? { background: r.color, borderColor: r.color } : {}}>
+                <span className="text-xl">{r.emoji}</span> {r.label}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <Field label="Comments (optional)">
+          <input className={numCls + " font-sans"} value={comments} onChange={e => setComments(e.target.value)} placeholder="What did they say?" />
+        </Field>
+        <button className={btnPrimary} onClick={save}>Save Review</button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Confirm Receipt ---------- */
 
 function ConfirmReceiptScreen({ db, session, persist, addLog, flash, onDone }) {
@@ -963,62 +1161,84 @@ function ConfirmReceiptScreen({ db, session, persist, addLog, flash, onDone }) {
   const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
   const kitchenName = (id) => (db.kitchens || []).find(k => k.id === id)?.name;
   const pending = db.issues.filter(x => !x.confirmed && myBranches.includes(x.to)).sort((a, b) => tsOf(b) - tsOf(a));
+  const TEN_MIN = 10 * 60 * 1000;
+  const recent = db.issues.filter(x => x.confirmed && x.confirmedBy === session.id && x.confirmedTs && (Date.now() - x.confirmedTs) < TEN_MIN).sort((a, b) => b.confirmedTs - a.confirmedTs);
   const [openId, setOpenId] = useState(null);
   const [adjustQty, setAdjustQty] = useState("");
 
-  const confirmOk = (issue) => {
-    const next = { ...db, issues: db.issues.map(x => x.id === issue.id ? { ...x, confirmed: true, confirmedQty: x.qty, confirmedBy: session.id, confirmedAt: nowStr() } : x) };
-    addLog(next, "Receipt Confirmed", `${itemName(issue.itemId)} at ${issue.to}${kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""}: matches, ${issue.qty}`);
-    persist(next); flash("Confirmed");
+  // Removes any previously-logged mismatch for this issue, so re-confirming doesn't double up.
+  const clearPriorMismatch = (dbNext, issueId) => {
+    dbNext.adjustments = (dbNext.adjustments || []).filter(a => !(a.kind === "received-mismatch" && a.issueId === issueId));
   };
 
-  const confirmMismatch = (issue) => {
+  const confirmOk = (issue, isEdit) => {
+    const next = { ...db, issues: db.issues.map(x => x.id === issue.id ? { ...x, confirmed: true, confirmedQty: x.qty, confirmedBy: session.id, confirmedAt: nowStr(), confirmedTs: Date.now() } : x) };
+    if (isEdit) clearPriorMismatch(next, issue.id);
+    addLog(next, isEdit ? "Receipt Corrected" : "Receipt Confirmed", `${itemName(issue.itemId)} at ${issue.to}${kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""}: matches, ${issue.qty}`);
+    persist(next); setOpenId(null); flash("Confirmed");
+  };
+
+  const confirmMismatch = (issue, isEdit) => {
     const actual = Number(adjustQty);
     if (adjustQty === "" || isNaN(actual)) { flash("Enter the quantity you actually received", "error"); return; }
     const diff = actual - issue.qty;
-    const next = { ...db, issues: db.issues.map(x => x.id === issue.id ? { ...x, confirmed: true, confirmedQty: actual, confirmedBy: session.id, confirmedAt: nowStr() } : x) };
+    const next = { ...db, issues: db.issues.map(x => x.id === issue.id ? { ...x, confirmed: true, confirmedQty: actual, confirmedBy: session.id, confirmedAt: nowStr(), confirmedTs: Date.now() } : x) };
+    if (isEdit) clearPriorMismatch(next, issue.id);
     if (diff !== 0) {
-      const adjRec = { id: uid("adj"), date: todayStr(), branch: issue.to, kitchenId: issue.kitchenId || null, itemId: issue.itemId, qty: diff, kind: "received-mismatch", reason: `Issued ${issue.qty}, received ${actual} (issue from ${issue.from})`, userId: session.id, senderUserId: issue.userId, issuedQty: issue.qty, receivedQty: actual, acknowledged: false };
+      const adjRec = { id: uid("adj"), date: todayStr(), branch: issue.to, kitchenId: issue.kitchenId || null, itemId: issue.itemId, qty: diff, kind: "received-mismatch", reason: `Issued ${issue.qty}, received ${actual} (issue from ${issue.from})`, userId: session.id, senderUserId: issue.userId, issuedQty: issue.qty, receivedQty: actual, acknowledged: false, issueId: issue.id };
       next.adjustments = [adjRec, ...(next.adjustments || [])];
     }
-    addLog(next, "Receipt Mismatch", `${itemName(issue.itemId)} at ${issue.to}: issued ${issue.qty}, received ${actual}`);
+    addLog(next, isEdit ? "Receipt Corrected" : "Receipt Mismatch", `${itemName(issue.itemId)} at ${issue.to}: issued ${issue.qty}, received ${actual}`);
     persist(next);
-    notifyUsers(
-      [...adminRecipients(db), issue.userId],
-      "Receipt mismatch",
-      `${itemName(issue.itemId)}: issued ${issue.qty}, received ${actual} at ${issue.to}${kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""} — reported by ${session.name}`
-    );
-    setOpenId(null); setAdjustQty(""); flash("Mismatch recorded and reported");
+    if (diff !== 0) {
+      notifyUsers(
+        [...adminRecipients(db), issue.userId],
+        "Receipt mismatch",
+        `${itemName(issue.itemId)}: issued ${issue.qty}, received ${actual} at ${issue.to}${kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""} — reported by ${session.name}`
+      );
+    }
+    setOpenId(null); setAdjustQty(""); flash(isEdit ? "Correction saved" : "Mismatch recorded and reported");
   };
+
+  const minutesLeft = (ts) => Math.max(1, Math.ceil((TEN_MIN - (Date.now() - ts)) / 60000));
+
+  const renderCard = (issue, isEdit) => (
+    <div key={issue.id} className="bg-white rounded-xl p-3.5 border-2 border-[#EAE4D4] mb-3">
+      <div className="flex justify-between items-start mb-2">
+        <div>
+          <div className="font-semibold text-[#1F2A24]">{itemName(issue.itemId)}</div>
+          <div className="text-[11px] text-[#8A9690]">from {issue.from} → {issue.to}{kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""} · {issue.date}</div>
+          {isEdit && <div className="text-[11px] text-[#C98A2C] font-semibold mt-0.5">Confirmed as {issue.confirmedQty} · edit window closes in {minutesLeft(issue.confirmedTs)} min</div>}
+        </div>
+        <div className="font-mono font-bold text-lg">{issue.qty}</div>
+      </div>
+      {openId !== issue.id ? (
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={() => confirmOk(issue, isEdit)} className="bg-[#2B6E63] text-white py-2.5 rounded-xl font-semibold text-sm">✓ Received OK</button>
+          <button onClick={() => { setOpenId(issue.id); setAdjustQty(isEdit ? String(issue.confirmedQty) : ""); }} className="bg-[#B33A3A] text-white py-2.5 rounded-xl font-semibold text-sm">✗ Different Amount</button>
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <input className={numCls} type="number" inputMode="decimal" placeholder="Actual qty received" value={adjustQty} onChange={e => setAdjustQty(e.target.value)} />
+          <button onClick={() => confirmMismatch(issue, isEdit)} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Save</button>
+          <button onClick={() => setOpenId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-3 rounded-xl font-semibold">Cancel</button>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div>
       <TopBar title="Confirm Receipt" onBack={onDone} />
       <div className="p-5">
-        {pending.length === 0 && <div className="text-sm text-[#8A9690]">Nothing waiting on confirmation.</div>}
-        {pending.map(issue => (
-          <div key={issue.id} className="bg-white rounded-xl p-3.5 border-2 border-[#EAE4D4] mb-3">
-            <div className="flex justify-between items-start mb-2">
-              <div>
-                <div className="font-semibold text-[#1F2A24]">{itemName(issue.itemId)}</div>
-                <div className="text-[11px] text-[#8A9690]">from {issue.from} → {issue.to}{kitchenName(issue.kitchenId) ? " (" + kitchenName(issue.kitchenId) + ")" : ""} · {issue.date}</div>
-              </div>
-              <div className="font-mono font-bold text-lg">{issue.qty}</div>
-            </div>
-            {openId !== issue.id ? (
-              <div className="grid grid-cols-2 gap-2">
-                <button onClick={() => confirmOk(issue)} className="bg-[#2B6E63] text-white py-2.5 rounded-xl font-semibold text-sm">✓ Received OK</button>
-                <button onClick={() => { setOpenId(issue.id); setAdjustQty(""); }} className="bg-[#B33A3A] text-white py-2.5 rounded-xl font-semibold text-sm">✗ Different Amount</button>
-              </div>
-            ) : (
-              <div className="flex gap-2">
-                <input className={numCls} type="number" inputMode="decimal" placeholder="Actual qty received" value={adjustQty} onChange={e => setAdjustQty(e.target.value)} />
-                <button onClick={() => confirmMismatch(issue)} className="bg-[#C98A2C] text-white px-4 rounded-xl font-semibold whitespace-nowrap">Save</button>
-                <button onClick={() => setOpenId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-3 rounded-xl font-semibold">Cancel</button>
-              </div>
-            )}
-          </div>
-        ))}
+        {pending.length === 0 && recent.length === 0 && <div className="text-sm text-[#8A9690]">Nothing waiting on confirmation.</div>}
+        {pending.map(issue => renderCard(issue, false))}
+        {recent.length > 0 && (
+          <React.Fragment>
+            <div className="text-xs font-semibold uppercase tracking-wide text-[#8A9690] mt-4 mb-1.5">Just confirmed — tap to fix a mistake</div>
+            {recent.map(issue => renderCard(issue, true))}
+          </React.Fragment>
+        )}
       </div>
     </div>
   );
@@ -1031,11 +1251,13 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
   const [branch, setBranch] = useState(myBranches[0]);
   const myKitchens = myKitchensFor(db, session, branch);
   const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
-  const [category, setCategory] = useState(db.categories[0]);
-  const [values, setValues] = useState({});
   const activeKitchen = myKitchens.find(k => k.id === kitchenId);
   const kitchenItemIds = activeKitchen && activeKitchen.itemIds && activeKitchen.itemIds.length ? activeKitchen.itemIds : null;
-  const items = db.items.filter(i => i.category === category && (!kitchenItemIds || kitchenItemIds.includes(i.id)));
+  const myCategories = categoriesForUser(db, session, kitchenItemIds);
+  const [category, setCategory] = useState(myCategories[0] || db.categories[0]);
+  useEffect(() => { if (!myCategories.includes(category)) setCategory(myCategories[0] || ""); }, [kitchenId, branch]);
+  const [values, setValues] = useState({});
+  const items = itemsForUser(db, session, db.items.filter(i => i.category === category && (!kitchenItemIds || kitchenItemIds.includes(i.id))));
   useEffect(() => { setValues({}); }, [category, branch, kitchenId]);
   useEffect(() => { setKitchenId(myKitchensFor(db, session, branch)[0]?.id || ""); }, [branch]);
   const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
@@ -1064,7 +1286,7 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
             </select>
           </Field>
         )}
-        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{myCategories.map(c => <option key={c}>{c}</option>)}</select></Field>
         <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Quantity Required</div>
         <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
         <button className={btnPrimary} onClick={save}>Save Demand</button>
@@ -1134,7 +1356,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "Activity Log"];
 
 function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf, onBack }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
@@ -1338,7 +1560,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                   <div><div className="font-semibold">{itemName(p.itemId)}</div><div className="text-xs text-[#8A9690]">{supplierName(p.supplierId)} · {p.date} · {p.paymentMode === "cash" ? "Cash" : "Credit"}</div></div>
                   <div className="flex items-center gap-3">
                     <div className="text-right"><div className="font-mono font-bold">{money(p.amount)}</div><div className="text-xs text-[#8A9690]">{p.qty} × {p.rate}</div></div>
-                    <button onClick={() => startEditPurchase(p)} className="text-[#5C6B62]">✎</button>
+                    {(session.permissions || []).includes("admin") && <button onClick={() => startEditPurchase(p)} className="text-[#5C6B62]">✎</button>}
                   </div>
                 </div>
               )
@@ -1398,8 +1620,9 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
               const allTx = [...purchaseTx, ...paymentTx]
                 .filter(t => !dateFilter || t.date === dateFilter)
                 .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
-              let running = 0;
-              const withBalance = allTx.map(t => { running += t.amount; return { ...t, balance: running }; });
+              let running = Number(ledgerSupplier.openingBalance || 0);
+              const openingRow = running !== 0 && !dateFilter ? [{ date: "—", type: "Opening", desc: "Opening balance", amount: running, balance: running }] : [];
+              const withBalance = [...openingRow, ...allTx.map(t => { running += t.amount; return { ...t, balance: running }; })];
               const totalPurchases = db.purchases.filter(p => p.supplierId === ledgerSupplierId && p.paymentMode !== "cash").reduce((a, p) => a + p.amount, 0);
               const totalPaid = (db.payments || []).filter(x => x.supplierId === ledgerSupplierId).reduce((a, x) => a + x.amount, 0);
               const bal = balanceOf(ledgerSupplierId);
@@ -1699,6 +1922,75 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             {(db.adjustments || []).filter(a => myBranches.includes(a.branch) && (!dateFilter || a.date === dateFilter)).length === 0 && <div className="text-sm text-[#8A9690]">No adjustments{dateFilter ? " on this date" : ""}.</div>}
           </ReportTable>
         )}
+        {tab === "Labor" && (() => {
+          const laborsVisible = (db.labors || []).filter(l => !l.branch || myBranches.includes(l.branch));
+          const rows = laborsVisible.map(l => {
+            const att = (db.attendance || []).filter(a => a.laborId === l.id && (!dateFilter || a.date === dateFilter));
+            const present = att.filter(a => a.status === "present").length;
+            const late = att.filter(a => a.status === "late").length;
+            const absent = att.filter(a => a.status === "absent").length;
+            const accrued = (present + late) * l.dailyWage;
+            const paid = (db.laborPayments || []).filter(p => p.laborId === l.id && (!dateFilter || p.date === dateFilter)).reduce((a, p) => a + p.amount, 0);
+            return { labor: l, present, late, absent, accrued, paid, due: accrued - paid };
+          });
+          return (
+            <ReportTable
+              title={dateFilter ? `Labor — ${dateFilter}` : "Labor — All Time"}
+              onExport={() => downloadCSV("labor.csv", toCSV(rows, [
+                { label: "Name", get: r => r.labor.name }, { label: "Present", get: r => r.present }, { label: "Late", get: r => r.late }, { label: "Absent", get: r => r.absent },
+                { label: "Accrued", get: r => r.accrued }, { label: "Paid", get: r => r.paid }, { label: "Due", get: r => r.due },
+              ]))}
+            >
+              {rows.map(r => (
+                <div key={r.labor.id} className="py-2.5 border-t border-[#EFEBDF] first:border-t-0">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-semibold text-sm">{r.labor.name}</span>
+                    <span className={`font-mono font-bold text-sm ${r.due > 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{money(r.due)} due</span>
+                  </div>
+                  <div className="text-[11px] text-[#8A9690]">
+                    Present {r.present} · Late {r.late} · Absent {r.absent} · Accrued {money(r.accrued)} · Paid {money(r.paid)}
+                  </div>
+                </div>
+              ))}
+              {rows.length === 0 && <div className="text-sm text-[#8A9690]">No labor added yet.</div>}
+            </ReportTable>
+          );
+        })()}
+        {tab === "Customer Reviews" && (() => {
+          const reviews = (db.customerReviews || []).filter(r => myBranches.includes(r.branch) && (!dateFilter || r.date === dateFilter));
+          const reviewLabel = (key) => REVIEW_OPTIONS.find(r => r.key === key)?.label || key;
+          const counts = REVIEW_OPTIONS.map(o => ({ ...o, count: reviews.filter(r => r.rating === o.key).length }));
+          return (
+            <ReportTable
+              title={dateFilter ? `Customer Reviews — ${dateFilter}` : "Customer Reviews — All Time"}
+              onExport={() => downloadCSV("customer-reviews.csv", toCSV(reviews, [
+                { label: "Date", get: r => r.date }, { label: "Branch", get: r => r.branch }, { label: "Name", get: r => r.name },
+                { label: "Phone", get: r => r.phone }, { label: "Rating", get: r => reviewLabel(r.rating) }, { label: "Comments", get: r => r.comments },
+              ]))}
+            >
+              <div className="flex flex-wrap gap-2 mb-3">
+                {counts.map(c => (
+                  <div key={c.key} className="flex items-center gap-1.5 bg-[#F7F5F0] rounded-full px-3 py-1.5 text-xs font-semibold" style={{ color: c.color }}>
+                    {c.emoji} {c.label}: {c.count}
+                  </div>
+                ))}
+              </div>
+              {reviews.map(r => {
+                const opt = REVIEW_OPTIONS.find(o => o.key === r.rating);
+                return (
+                  <div key={r.id} className="py-2.5 border-t border-[#EFEBDF] first:border-t-0">
+                    <div className="flex justify-between items-center mb-0.5">
+                      <span className="font-semibold text-sm">{r.name || "Anonymous"}{r.phone ? ` · ${r.phone}` : ""}</span>
+                      <span className="text-xs font-semibold" style={{ color: opt?.color }}>{opt?.emoji} {opt?.label}</span>
+                    </div>
+                    <div className="text-[11px] text-[#8A9690]">{r.branch} · {r.date}{r.comments ? " — " + r.comments : ""}</div>
+                  </div>
+                );
+              })}
+              {reviews.length === 0 && <div className="text-sm text-[#8A9690]">No reviews{dateFilter ? " on this date" : ""} yet.</div>}
+            </ReportTable>
+          );
+        })()}
         {tab === "Activity Log" && (
           <ReportTable title={dateFilter ? `User Activity — ${dateFilter}` : "User Activity"} onExport={() => downloadCSV("activity-log.csv", toCSV(db.log.filter(l => !dateFilter || l.date === dateFilter), [{ label: "Time", get: l => l.at }, { label: "User", get: l => l.user }, { label: "Action", get: l => l.action }, { label: "Detail", get: l => l.detail }]))}>
             {db.log.filter(l => !dateFilter || l.date === dateFilter).slice(0, 200).map(l => (
@@ -1736,12 +2028,14 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newItemUnit, setNewItemUnit] = useState("kg");
   const [newSupplierName, setNewSupplierName] = useState("");
   const [newSupplierItems, setNewSupplierItems] = useState([]);
+  const [newSupplierOpening, setNewSupplierOpening] = useState("");
   const [newUserName, setNewUserName] = useState("");
   const [newUserPin, setNewUserPin] = useState("");
   const [newUserPerms, setNewUserPerms] = useState(["purchase"]);
   const [newUserBranches, setNewUserBranches] = useState([...BRANCHES]);
   const [newUserReportTabs, setNewUserReportTabs] = useState([...REPORT_TABS]);
   const [newUserKitchens, setNewUserKitchens] = useState([]);
+  const [newUserItemIds, setNewUserItemIds] = useState([]);
   const [newUserNotifications, setNewUserNotifications] = useState(true);
   const [newKitchenName, setNewKitchenName] = useState("");
   const [newKitchenBranch, setNewKitchenBranch] = useState(BRANCHES.find(b => b !== "Store") || BRANCHES[0]);
@@ -1777,10 +2071,10 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next); setEditItemId(null); flash("Item updated");
   };
 
-  const addSupplier = () => { if (!newSupplierName.trim()) return; const rec = { id: uid("s"), name: newSupplierName.trim(), itemIds: newSupplierItems }; const next = { ...db, suppliers: [...db.suppliers, rec] }; addLog(next, "Admin", `Added supplier ${rec.name}`); persist(next); setNewSupplierName(""); setNewSupplierItems([]); flash("Supplier added"); };
+  const addSupplier = () => { if (!newSupplierName.trim()) return; const rec = { id: uid("s"), name: newSupplierName.trim(), itemIds: newSupplierItems, openingBalance: Number(newSupplierOpening) || 0 }; const next = { ...db, suppliers: [...db.suppliers, rec] }; addLog(next, "Admin", `Added supplier ${rec.name}`); persist(next); setNewSupplierName(""); setNewSupplierItems([]); setNewSupplierOpening(""); flash("Supplier added"); };
   const delSupplier = (id) => persist({ ...db, suppliers: db.suppliers.filter(s => s.id !== id) });
   const toggleSupplierItem = (id) => setNewSupplierItems(v => v.includes(id) ? v.filter(x => x !== id) : [...v, id]);
-  const startEditSupplier = (s) => { setEditSupplierId(s.id); setEditSupplierDraft({ name: s.name, itemIds: [...s.itemIds] }); };
+  const startEditSupplier = (s) => { setEditSupplierId(s.id); setEditSupplierDraft({ name: s.name, itemIds: [...s.itemIds], openingBalance: s.openingBalance || 0 }); };
   const toggleEditSupplierItem = (id) => setEditSupplierDraft(d => ({ ...d, itemIds: d.itemIds.includes(id) ? d.itemIds.filter(x => x !== id) : [...d.itemIds, id] }));
   const saveEditSupplier = () => {
     const next = { ...db, suppliers: db.suppliers.map(s => s.id === editSupplierId ? { ...s, ...editSupplierDraft } : s) };
@@ -1788,7 +2082,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next); setEditSupplierId(null); flash("Supplier updated");
   };
 
-  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens, notifications: newUserNotifications }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); setNewUserNotifications(true); flash("User added"); };
+  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens, itemIds: newUserItemIds, notifications: newUserNotifications }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); setNewUserItemIds([]); setNewUserNotifications(true); flash("User added"); };
   const delUser = (id) => persist({ ...db, users: db.users.filter(u => u.id !== id) });
   const toggleUserPerm = (userId, perm) => {
     const next = { ...db, users: db.users.map(u => {
@@ -1873,10 +2167,44 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next);
   };
 
+  const [openingBranch, setOpeningBranch] = useState(BRANCHES[0]);
+  const [openingCat, setOpeningCat] = useState(db.categories[0]);
+  const [openingValues, setOpeningValues] = useState(() => ({ ...(db.openingStock?.[openingBranch] || {}) }));
+  useEffect(() => { setOpeningValues({ ...(db.openingStock?.[openingBranch] || {}) }); }, [openingBranch]);
+  const saveOpeningStock = () => {
+    const cleaned = {};
+    Object.entries(openingValues).forEach(([id, v]) => { if (v !== "" && v !== undefined && Number(v) !== 0) cleaned[id] = Number(v); });
+    const next = { ...db, openingStock: { ...db.openingStock, [openingBranch]: cleaned } };
+    addLog(next, "Admin", `Set opening stock for ${openingBranch}`);
+    persist(next); flash("Opening stock saved");
+  };
+
+  const [newLaborName, setNewLaborName] = useState("");
+  const [newLaborNic, setNewLaborNic] = useState("");
+  const [newLaborPhone, setNewLaborPhone] = useState("");
+  const [newLaborWage, setNewLaborWage] = useState("");
+  const [newLaborBranch, setNewLaborBranch] = useState("");
+  const [editLaborId, setEditLaborId] = useState(null);
+  const [editLaborDraft, setEditLaborDraft] = useState({});
+  const addLabor = () => {
+    if (!newLaborName.trim() || !newLaborWage || Number(newLaborWage) <= 0) { flash("Name and daily wage required", "error"); return; }
+    const rec = { id: uid("lab"), name: newLaborName.trim(), nic: newLaborNic.trim(), phone: newLaborPhone.trim(), dailyWage: Number(newLaborWage), branch: newLaborBranch || null, active: true };
+    const next = { ...db, labors: [...(db.labors || []), rec] };
+    addLog(next, "Admin", `Added labor ${rec.name}`);
+    persist(next); setNewLaborName(""); setNewLaborNic(""); setNewLaborPhone(""); setNewLaborWage(""); setNewLaborBranch(""); flash("Labor added");
+  };
+  const delLabor = (id) => persist({ ...db, labors: (db.labors || []).filter(l => l.id !== id) });
+  const startEditLabor = (l) => { setEditLaborId(l.id); setEditLaborDraft({ name: l.name, nic: l.nic || "", phone: l.phone || "", dailyWage: l.dailyWage, branch: l.branch || "" }); };
+  const saveEditLabor = () => {
+    const next = { ...db, labors: (db.labors || []).map(l => l.id === editLaborId ? { ...l, name: editLaborDraft.name.trim(), nic: editLaborDraft.nic.trim(), phone: editLaborDraft.phone.trim(), dailyWage: Number(editLaborDraft.dailyWage) || 0, branch: editLaborDraft.branch || null } : l) };
+    addLog(next, "Admin", `Edited labor ${editLaborDraft.name}`);
+    persist(next); setEditLaborId(null); flash("Labor updated");
+  };
+
   const resetTransactions = () => {
-    if (!window.confirm("This deletes ALL purchase, issue, ending, demand, adjustment, and payment entries plus the activity log — permanently. Items, suppliers, users, kitchens, and rates stay. Continue?")) return;
+    if (!window.confirm("This deletes ALL purchase, issue, ending, demand, adjustment, payment, and labor attendance/payment entries plus the activity log — permanently. Items, suppliers, users, kitchens, labor list, and rates stay. Continue?")) return;
     if (!window.confirm("Are you sure? This cannot be undone.")) return;
-    const next = { ...db, purchases: [], issues: [], endings: [], demands: [], payments: [], adjustments: [], demandAdjustments: [], voidedDemandItems: [], todayRates: {}, log: [] };
+    const next = { ...db, purchases: [], issues: [], endings: [], demands: [], payments: [], adjustments: [], demandAdjustments: [], voidedDemandItems: [], attendance: [], laborPayments: [], todayRates: {}, log: [] };
     persist(next);
     flash("All entries cleared — items, suppliers and users kept");
   };
@@ -1885,7 +2213,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     <div>
       <TopBar title="Admin" onBack={onBack} />
       <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
-        {["Items", "Suppliers", "Rates", "Kitchens", "Recipes", "Users", "Reset"].map(t => (
+        {["Items", "Suppliers", "Rates", "Opening Stock", "Kitchens", "Recipes", "Labor", "Users", "Reset"].map(t => (
           <button key={t} onClick={() => setTab(t)} className={`flex-1 whitespace-nowrap py-2.5 px-3 rounded-xl text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
         ))}
       </div>
@@ -1936,6 +2264,8 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
           <React.Fragment>
             <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
               <input className={numCls + " font-sans mb-2"} placeholder="Supplier name" value={newSupplierName} onChange={e => setNewSupplierName(e.target.value)} />
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening balance (owed before using this app, 0 if none)</div>
+              <input className={numCls + " mb-2"} type="number" placeholder="0" value={newSupplierOpening} onChange={e => setNewSupplierOpening(e.target.value)} />
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Linked items</div>
               <div className="flex flex-wrap gap-1.5 mb-2">
                 {db.items.map(i => (
@@ -1948,6 +2278,8 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               editSupplierId === s.id ? (
                 <div key={s.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
                   <input className={numCls + " font-sans mb-2"} value={editSupplierDraft.name} onChange={e => setEditSupplierDraft(d => ({ ...d, name: e.target.value }))} />
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening balance</div>
+                  <input className={numCls + " mb-2"} type="number" value={editSupplierDraft.openingBalance} onChange={e => setEditSupplierDraft(d => ({ ...d, openingBalance: Number(e.target.value) || 0 }))} />
                   <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Linked items</div>
                   <div className="flex flex-wrap gap-1.5 mb-2 max-h-40 overflow-y-auto">
                     {db.items.map(i => (
@@ -1961,7 +2293,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 </div>
               ) : (
                 <div key={s.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
-                  <span className="text-sm"><b>{s.name}</b> <span className="text-[#8A9690]">· {s.itemIds.length} item(s)</span></span>
+                  <span className="text-sm"><b>{s.name}</b> <span className="text-[#8A9690]">· {s.itemIds.length} item(s){s.openingBalance ? ` · opening ${money(s.openingBalance)}` : ""}</span></span>
                   <div className="flex items-center gap-3">
                     <button onClick={() => startEditSupplier(s)} className="text-[#5C6B62]">✎</button>
                     <button onClick={() => delSupplier(s.id)} className="text-[#B33A3A]">✕</button>
@@ -2007,6 +2339,17 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               );
             })}
             {ratesSupplier && ratesSupplier.itemIds.length === 0 && <div className="text-sm text-[#8A9690]">This supplier has no linked items yet — add them in the Suppliers tab.</div>}
+          </React.Fragment>
+        )}
+        {tab === "Opening Stock" && (
+          <React.Fragment>
+            <div className="text-sm text-[#5C6B62] mb-3">Set what's already on hand before you started using this app. These add to every stock and Material Used calculation for that branch.</div>
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              <select className={selCls} value={openingBranch} onChange={e => setOpeningBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select>
+              <select className={selCls} value={openingCat} onChange={e => setOpeningCat(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select>
+            </div>
+            <div className="mb-4"><ItemQtyGrid items={db.items.filter(i => i.category === openingCat)} values={openingValues} setValues={setOpeningValues} /></div>
+            <button onClick={saveOpeningStock} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">Save Opening Stock for {openingBranch}</button>
           </React.Fragment>
         )}
         {tab === "Kitchens" && (
@@ -2130,6 +2473,59 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
             {(db.recipes || []).length === 0 && <div className="text-sm text-[#8A9690]">No recipes yet — add one above so Conversion has something to use.</div>}
           </React.Fragment>
         )}
+        {tab === "Labor" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <input className={numCls + " font-sans mb-2"} placeholder="Name" value={newLaborName} onChange={e => setNewLaborName(e.target.value)} />
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <input className={numCls + " font-sans"} placeholder="NIC number" value={newLaborNic} onChange={e => setNewLaborNic(e.target.value)} />
+                <input className={numCls} type="tel" placeholder="Contact number" value={newLaborPhone} onChange={e => setNewLaborPhone(e.target.value)} />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input className={numCls} type="number" placeholder="Daily wage" value={newLaborWage} onChange={e => setNewLaborWage(e.target.value)} />
+                <select className={selCls} value={newLaborBranch} onChange={e => setNewLaborBranch(e.target.value)}>
+                  <option value="">Any branch</option>
+                  {BRANCHES.map(b => <option key={b}>{b}</option>)}
+                </select>
+              </div>
+              <button onClick={addLabor} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold mt-2">+ Add Labor</button>
+            </div>
+            {(db.labors || []).map(l => (
+              editLaborId === l.id ? (
+                <div key={l.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
+                  <input className={numCls + " font-sans mb-2"} value={editLaborDraft.name} onChange={e => setEditLaborDraft(d => ({ ...d, name: e.target.value }))} />
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <input className={numCls + " font-sans"} placeholder="NIC number" value={editLaborDraft.nic} onChange={e => setEditLaborDraft(d => ({ ...d, nic: e.target.value }))} />
+                    <input className={numCls} type="tel" placeholder="Contact number" value={editLaborDraft.phone} onChange={e => setEditLaborDraft(d => ({ ...d, phone: e.target.value }))} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <input className={numCls} type="number" value={editLaborDraft.dailyWage} onChange={e => setEditLaborDraft(d => ({ ...d, dailyWage: e.target.value }))} />
+                    <select className={selCls} value={editLaborDraft.branch} onChange={e => setEditLaborDraft(d => ({ ...d, branch: e.target.value }))}>
+                      <option value="">Any branch</option>
+                      {BRANCHES.map(b => <option key={b}>{b}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={saveEditLabor} className="bg-[#2B6E63] text-white px-4 rounded-xl font-semibold">Save</button>
+                    <button onClick={() => setEditLaborId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 rounded-xl font-semibold">Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div key={l.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                  <span className="text-sm">
+                    <b>{l.name}</b> <span className="text-[#8A9690]">· {money(l.dailyWage)}/day · {l.branch || "any branch"}</span>
+                    {(l.nic || l.phone) && <div className="text-[11px] text-[#8A9690] mt-0.5">{l.nic}{l.nic && l.phone ? " · " : ""}{l.phone}</div>}
+                  </span>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => startEditLabor(l)} className="text-[#5C6B62]">✎</button>
+                    <button onClick={() => delLabor(l.id)} className="text-[#B33A3A]">✕</button>
+                  </div>
+                </div>
+              )
+            ))}
+            {(db.labors || []).length === 0 && <div className="text-sm text-[#8A9690]">No labor added yet.</div>}
+          </React.Fragment>
+        )}
         {tab === "Users" && (
           <React.Fragment>
             <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
@@ -2147,6 +2543,8 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                   <div className="mb-3"><KitchenChips kitchens={(db.kitchens || []).filter(k => newUserBranches.includes(k.branch))} selected={newUserKitchens} onToggle={(id) => setNewUserKitchens(v => v.includes(id) ? v.filter(x => x !== id) : [...v, id])} /></div>
                 </React.Fragment>
               )}
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Items/categories visible (leave blank for all)</div>
+              <div className="mb-3"><UserCategoryItemPicker db={db} selectedItemIds={newUserItemIds} onSetItemIds={setNewUserItemIds} /></div>
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Report tabs visible</div>
               <div className="mb-3"><ReportTabChips selected={newUserReportTabs} onToggle={(t) => setNewUserReportTabs(v => v.includes(t) ? v.filter(x => x !== t) : [...v, t])} /></div>
               <label className="flex items-center gap-2 mb-3 text-sm font-medium">
@@ -2170,6 +2568,8 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                     <KitchenChips kitchens={(db.kitchens || []).filter(k => (u.branches || []).includes(k.branch))} selected={u.kitchens || []} onToggle={(id) => toggleUserKitchen(u.id, id)} />
                   </React.Fragment>
                 )}
+                <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Items/categories visible (blank = all)</div>
+                <UserCategoryItemPicker db={db} selectedItemIds={u.itemIds || []} onSetItemIds={(ids) => persist({ ...db, users: db.users.map(x => x.id === u.id ? { ...x, itemIds: ids } : x) })} />
                 {(u.permissions || []).includes("reports") && (
                   <React.Fragment>
                     <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Report tabs visible</div>
