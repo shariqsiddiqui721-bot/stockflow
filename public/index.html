@@ -10,6 +10,7 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; }
   input[type=number]::-webkit-inner-spin-button { opacity: 1; }
@@ -19,7 +20,7 @@
 <div id="root"></div>
 
 <script type="text/plain" id="app-source">
-const { useState, useEffect, useMemo, useCallback } = React;
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 const BRANCHES = ["Store", "FB", "North", "BBQ"];
 const ALL_PERMISSIONS = ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "labor", "review", "payment", "reports", "admin"];
@@ -262,6 +263,57 @@ function categoriesForUser(db, session, kitchenItemIds) {
   const allowed = itemsForUser(db, session, db.items).filter(i => !kitchenItemIds || kitchenItemIds.includes(i.id));
   const cats = [...new Set(allowed.map(i => i.category))];
   return db.categories.filter(c => cats.includes(c));
+}
+
+// Reads a 2-column Excel/CSV file (Name, Amount/Qty) into [{name, value}]. Header row is auto-skipped
+// since a non-numeric second column fails the value check and gets dropped.
+function parseTwoColFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const wb = XLSX.read(data, { type: "array" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+        const out = rows
+          .filter(r => r && r.length >= 2 && r[0] !== undefined && r[0] !== "")
+          .map(r => ({ name: String(r[0]).trim(), value: Number(r[1]) }))
+          .filter(r => r.name && !isNaN(r.value));
+        resolve(out);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error("Could not read file"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// A file-picker + "Upload" button. Calls onRows(parsedRows) once a file is chosen and parsed.
+function FileUploadRow({ onRows, flash, label }) {
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+  const doUpload = async () => {
+    if (!file) { flash("Choose a file first", "error"); return; }
+    setBusy(true);
+    try {
+      const rows = await parseTwoColFile(file);
+      if (rows.length === 0) { flash("No valid rows found — expect column A = name, column B = amount/qty", "error"); setBusy(false); return; }
+      onRows(rows);
+      setFile(null);
+      if (inputRef.current) inputRef.current.value = "";
+    } catch (e) {
+      flash("Couldn't read that file", "error");
+    }
+    setBusy(false);
+  };
+  return (
+    <div className="flex gap-2 items-center">
+      <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv" onChange={e => setFile(e.target.files[0] || null)}
+        className="flex-1 text-xs file:mr-2 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-[#F7F5F0] file:text-[#5C6B62] file:font-semibold" />
+      <button onClick={doUpload} disabled={busy} className="bg-[#4A6FA5] text-white px-3 py-2 rounded-xl font-semibold text-xs whitespace-nowrap disabled:opacity-50">{busy ? "..." : (label || "Upload")}</button>
+    </div>
+  );
 }
 
 function KitchenChips({ kitchens, selected, onToggle }) {
@@ -1962,7 +2014,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             const absent = att.filter(a => a.status === "absent").length;
             const accrued = (present + late) * l.dailyWage;
             const paid = (db.laborPayments || []).filter(p => p.laborId === l.id && (!dateFilter || p.date === dateFilter)).reduce((a, p) => a + p.amount, 0);
-            return { labor: l, present, late, absent, accrued, paid, due: accrued - paid };
+            const opening = dateFilter ? 0 : Number(l.openingDue || 0);
+            return { labor: l, present, late, absent, accrued, paid, opening, due: opening + accrued - paid };
           });
           return (
             <ReportTable
@@ -1979,7 +2032,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                     <span className={`font-mono font-bold text-sm ${r.due > 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{money(r.due)} due</span>
                   </div>
                   <div className="text-[11px] text-[#8A9690]">
-                    Present {r.present} · Late {r.late} · Absent {r.absent} · Accrued {money(r.accrued)} · Paid {money(r.paid)}
+                    Present {r.present} · Late {r.late} · Absent {r.absent} · Accrued {money(r.accrued)}{r.opening ? ` · Opening ${money(r.opening)}` : ""} · Paid {money(r.paid)}
                   </div>
                 </div>
               ))}
@@ -2199,15 +2252,36 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   };
 
   const [openingBranch, setOpeningBranch] = useState(BRANCHES[0]);
+  const [openingKitchenId, setOpeningKitchenId] = useState("");
+  const openingKitchenOptions = kitchensOf(db, openingBranch);
+  const openingActiveKitchen = openingKitchenOptions.find(k => k.id === openingKitchenId);
+  const openingKitchenItemIds = openingActiveKitchen && openingActiveKitchen.itemIds && openingActiveKitchen.itemIds.length ? openingActiveKitchen.itemIds : null;
   const [openingCat, setOpeningCat] = useState(db.categories[0]);
   const [openingValues, setOpeningValues] = useState(() => ({ ...(db.openingStock?.[openingBranch] || {}) }));
-  useEffect(() => { setOpeningValues({ ...(db.openingStock?.[openingBranch] || {}) }); }, [openingBranch]);
+  useEffect(() => { setOpeningValues({ ...(db.openingStock?.[openingBranch] || {}) }); setOpeningKitchenId(""); }, [openingBranch]);
   const saveOpeningStock = () => {
-    const cleaned = {};
-    Object.entries(openingValues).forEach(([id, v]) => { if (v !== "" && v !== undefined && Number(v) !== 0) cleaned[id] = Number(v); });
+    const cleaned = { ...(db.openingStock?.[openingBranch] || {}) };
+    Object.entries(openingValues).forEach(([id, v]) => {
+      if (v === "" || v === undefined || Number(v) === 0) delete cleaned[id];
+      else cleaned[id] = Number(v);
+    });
     const next = { ...db, openingStock: { ...db.openingStock, [openingBranch]: cleaned } };
-    addLog(next, "Admin", `Set opening stock for ${openingBranch}`);
+    addLog(next, "Admin", `Set opening stock for ${openingBranch}${openingActiveKitchen ? " (" + openingActiveKitchen.name + " items)" : ""}`);
     persist(next); flash("Opening stock saved");
+  };
+  const uploadOpeningStock = (rows) => {
+    let matched = 0;
+    const cleaned = { ...(db.openingStock?.[openingBranch] || {}) };
+    rows.forEach(row => {
+      const item = db.items.find(i => i.name.toLowerCase() === row.name.toLowerCase() && (!openingKitchenItemIds || openingKitchenItemIds.includes(i.id)));
+      if (item) { cleaned[item.id] = row.value; matched++; }
+    });
+    const unmatched = rows.length - matched;
+    const next = { ...db, openingStock: { ...db.openingStock, [openingBranch]: cleaned } };
+    addLog(next, "Admin", `Uploaded opening stock for ${openingBranch}: ${matched} matched, ${unmatched} not found`);
+    persist(next);
+    setOpeningValues(cleaned);
+    flash(`Updated ${matched} item(s)${unmatched ? `, ${unmatched} name(s) not found` : ""}`);
   };
 
   const [newLaborName, setNewLaborName] = useState("");
@@ -2215,21 +2289,36 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newLaborPhone, setNewLaborPhone] = useState("");
   const [newLaborWage, setNewLaborWage] = useState("");
   const [newLaborBranch, setNewLaborBranch] = useState("");
+  const [newLaborOpening, setNewLaborOpening] = useState("");
   const [editLaborId, setEditLaborId] = useState(null);
   const [editLaborDraft, setEditLaborDraft] = useState({});
+  const [laborUploadBranch, setLaborUploadBranch] = useState("");
   const addLabor = () => {
     if (!newLaborName.trim() || !newLaborWage || Number(newLaborWage) <= 0) { flash("Name and daily wage required", "error"); return; }
-    const rec = { id: uid("lab"), name: newLaborName.trim(), nic: newLaborNic.trim(), phone: newLaborPhone.trim(), dailyWage: Number(newLaborWage), branch: newLaborBranch || null, active: true };
+    const rec = { id: uid("lab"), name: newLaborName.trim(), nic: newLaborNic.trim(), phone: newLaborPhone.trim(), dailyWage: Number(newLaborWage), branch: newLaborBranch || null, openingDue: Number(newLaborOpening) || 0, active: true };
     const next = { ...db, labors: [...(db.labors || []), rec] };
     addLog(next, "Admin", `Added labor ${rec.name}`);
-    persist(next); setNewLaborName(""); setNewLaborNic(""); setNewLaborPhone(""); setNewLaborWage(""); setNewLaborBranch(""); flash("Labor added");
+    persist(next); setNewLaborName(""); setNewLaborNic(""); setNewLaborPhone(""); setNewLaborWage(""); setNewLaborBranch(""); setNewLaborOpening(""); flash("Labor added");
   };
   const delLabor = (id) => persist({ ...db, labors: (db.labors || []).filter(l => l.id !== id) });
-  const startEditLabor = (l) => { setEditLaborId(l.id); setEditLaborDraft({ name: l.name, nic: l.nic || "", phone: l.phone || "", dailyWage: l.dailyWage, branch: l.branch || "" }); };
+  const startEditLabor = (l) => { setEditLaborId(l.id); setEditLaborDraft({ name: l.name, nic: l.nic || "", phone: l.phone || "", dailyWage: l.dailyWage, branch: l.branch || "", openingDue: l.openingDue || 0 }); };
   const saveEditLabor = () => {
-    const next = { ...db, labors: (db.labors || []).map(l => l.id === editLaborId ? { ...l, name: editLaborDraft.name.trim(), nic: editLaborDraft.nic.trim(), phone: editLaborDraft.phone.trim(), dailyWage: Number(editLaborDraft.dailyWage) || 0, branch: editLaborDraft.branch || null } : l) };
+    const next = { ...db, labors: (db.labors || []).map(l => l.id === editLaborId ? { ...l, name: editLaborDraft.name.trim(), nic: editLaborDraft.nic.trim(), phone: editLaborDraft.phone.trim(), dailyWage: Number(editLaborDraft.dailyWage) || 0, branch: editLaborDraft.branch || null, openingDue: Number(editLaborDraft.openingDue) || 0 } : l) };
     addLog(next, "Admin", `Edited labor ${editLaborDraft.name}`);
     persist(next); setEditLaborId(null); flash("Labor updated");
+  };
+  const uploadLaborOpening = (rows) => {
+    let matched = 0;
+    const next = { ...db, labors: (db.labors || []).map(l => {
+      if (laborUploadBranch && l.branch !== laborUploadBranch) return l;
+      const row = rows.find(r => r.name.toLowerCase() === l.name.toLowerCase());
+      if (row) { matched++; return { ...l, openingDue: row.value }; }
+      return l;
+    }) };
+    const unmatched = rows.length - matched;
+    addLog(next, "Admin", `Uploaded labor opening due${laborUploadBranch ? " for " + laborUploadBranch : ""}: ${matched} matched, ${unmatched} not found`);
+    persist(next);
+    flash(`Updated ${matched} labor(s)${unmatched ? `, ${unmatched} name(s) not found` : ""}`);
   };
 
   const resetTransactions = () => {
@@ -2305,6 +2394,21 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               </div>
               <button onClick={addSupplier} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Supplier</button>
             </div>
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Upload opening balances (Excel/CSV: col A = supplier name, col B = amount owed)</div>
+              <FileUploadRow flash={flash} onRows={(rows) => {
+                let matched = 0, unmatched = 0;
+                const next = { ...db, suppliers: db.suppliers.map(s => {
+                  const row = rows.find(r => r.name.toLowerCase() === s.name.toLowerCase());
+                  if (row) { matched++; return { ...s, openingBalance: row.value }; }
+                  return s;
+                }) };
+                unmatched = rows.length - matched;
+                addLog(next, "Admin", `Uploaded opening balances: ${matched} matched, ${unmatched} not found`);
+                persist(next);
+                flash(`Updated ${matched} supplier(s)${unmatched ? `, ${unmatched} name(s) not found` : ""}`);
+              }} />
+            </div>
             {db.suppliers.map(s => (
               editSupplierId === s.id ? (
                 <div key={s.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
@@ -2375,11 +2479,21 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
         {tab === "Opening Stock" && (
           <React.Fragment>
             <div className="text-sm text-[#5C6B62] mb-3">Set what's already on hand before you started using this app. These add to every stock and Material Used calculation for that branch.</div>
-            <div className="grid grid-cols-2 gap-2 mb-3">
+            <div className="grid grid-cols-2 gap-2 mb-2">
               <select className={selCls} value={openingBranch} onChange={e => setOpeningBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select>
               <select className={selCls} value={openingCat} onChange={e => setOpeningCat(e.target.value)}>{db.categories.map(c => <option key={c}>{c}</option>)}</select>
             </div>
-            <div className="mb-4"><ItemQtyGrid items={db.items.filter(i => i.category === openingCat)} values={openingValues} setValues={setOpeningValues} /></div>
+            {openingKitchenOptions.length > 0 && (
+              <select className={selCls + " mb-3"} value={openingKitchenId} onChange={e => setOpeningKitchenId(e.target.value)}>
+                <option value="">All of {openingBranch} (no kitchen filter)</option>
+                {openingKitchenOptions.map(k => <option key={k.id} value={k.id}>{k.name} items only</option>)}
+              </select>
+            )}
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Upload opening stock (Excel/CSV: col A = item name, col B = qty) — for {openingBranch}{openingActiveKitchen ? ` / ${openingActiveKitchen.name}` : ""}</div>
+              <FileUploadRow flash={flash} onRows={uploadOpeningStock} />
+            </div>
+            <div className="mb-4"><ItemQtyGrid items={db.items.filter(i => i.category === openingCat && (!openingKitchenItemIds || openingKitchenItemIds.includes(i.id)))} values={openingValues} setValues={setOpeningValues} /></div>
             <button onClick={saveOpeningStock} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">Save Opening Stock for {openingBranch}</button>
           </React.Fragment>
         )}
@@ -2512,14 +2626,24 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 <input className={numCls + " font-sans"} placeholder="NIC number" value={newLaborNic} onChange={e => setNewLaborNic(e.target.value)} />
                 <input className={numCls} type="tel" placeholder="Contact number" value={newLaborPhone} onChange={e => setNewLaborPhone(e.target.value)} />
               </div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-2 mb-2">
                 <input className={numCls} type="number" placeholder="Daily wage" value={newLaborWage} onChange={e => setNewLaborWage(e.target.value)} />
                 <select className={selCls} value={newLaborBranch} onChange={e => setNewLaborBranch(e.target.value)}>
                   <option value="">Any branch</option>
                   {BRANCHES.map(b => <option key={b}>{b}</option>)}
                 </select>
               </div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening due (owed before using this app, 0 if none)</div>
+              <input className={numCls} type="number" placeholder="0" value={newLaborOpening} onChange={e => setNewLaborOpening(e.target.value)} />
               <button onClick={addLabor} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold mt-2">+ Add Labor</button>
+            </div>
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Upload opening due (Excel/CSV: col A = labor name, col B = amount due)</div>
+              <select className={selCls + " mb-2"} value={laborUploadBranch} onChange={e => setLaborUploadBranch(e.target.value)}>
+                <option value="">All branches</option>
+                {BRANCHES.map(b => <option key={b}>{b}</option>)}
+              </select>
+              <FileUploadRow flash={flash} onRows={uploadLaborOpening} />
             </div>
             {(db.labors || []).map(l => (
               editLaborId === l.id ? (
@@ -2536,6 +2660,8 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                       {BRANCHES.map(b => <option key={b}>{b}</option>)}
                     </select>
                   </div>
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening due</div>
+                  <input className={numCls + " mb-2"} type="number" value={editLaborDraft.openingDue} onChange={e => setEditLaborDraft(d => ({ ...d, openingDue: e.target.value }))} />
                   <div className="flex gap-2">
                     <button onClick={saveEditLabor} className="bg-[#2B6E63] text-white px-4 rounded-xl font-semibold">Save</button>
                     <button onClick={() => setEditLaborId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 rounded-xl font-semibold">Cancel</button>
@@ -2544,7 +2670,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               ) : (
                 <div key={l.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
                   <span className="text-sm">
-                    <b>{l.name}</b> <span className="text-[#8A9690]">· {money(l.dailyWage)}/day · {l.branch || "any branch"}</span>
+                    <b>{l.name}</b> <span className="text-[#8A9690]">· {money(l.dailyWage)}/day · {l.branch || "any branch"}{l.openingDue ? ` · opening ${money(l.openingDue)}` : ""}</span>
                     {(l.nic || l.phone) && <div className="text-[11px] text-[#8A9690] mt-0.5">{l.nic}{l.nic && l.phone ? " · " : ""}{l.phone}</div>}
                   </span>
                   <div className="flex items-center gap-3">
