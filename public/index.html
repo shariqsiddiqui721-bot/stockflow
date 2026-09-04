@@ -1507,7 +1507,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "POS Sales", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Activity Log"];
 const POS_BRANCH_MAP = { "Federal B Area": "FB", "North Nazimabad": "North" };
 const mapPosBranch = (b) => POS_BRANCH_MAP[b] || b;
 
@@ -2225,30 +2225,6 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                 );
               })}
               {reviews.length === 0 && <div className="text-sm text-[#8A9690]">No reviews{dateFilter ? " on this date" : ""} yet.</div>}
-            </ReportTable>
-          );
-        })()}
-        {tab === "POS Sales" && (() => {
-          const sales = (db.posSales || []).filter(s => myBranches.includes(s.branch) && (!dateFilter || s.date === dateFilter) && s.itemName.toLowerCase().includes(q.toLowerCase()));
-          const byItem = {};
-          sales.forEach(s => { byItem[s.itemName] = (byItem[s.itemName] || 0) + s.qty; });
-          return (
-            <ReportTable
-              title={dateFilter ? `POS Sales — ${dateFilter}` : "POS Sales — All Time"}
-              onExport={() => downloadCSV("pos-sales.csv", toCSV(sales, [
-                { label: "Date", get: s => s.date }, { label: "Branch", get: s => s.branch }, { label: "Item", get: s => s.itemName },
-                { label: "Qty", get: s => s.qty }, { label: "Source", get: s => s.source },
-              ]))}
-            >
-              <table className="w-full text-sm mb-3">
-                <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Qty Sold</th></tr></thead>
-                <tbody>
-                  {Object.entries(byItem).map(([name, qty]) => (
-                    <tr key={name} className="border-t border-[#EFEBDF]"><td className="py-2 font-medium">{name}</td><td className="text-right py-2 font-mono">{qty}</td></tr>
-                  ))}
-                </tbody>
-              </table>
-              {sales.length === 0 && <div className="text-sm text-[#8A9690]">No POS sales{dateFilter ? " on this date" : ""} yet.</div>}
             </ReportTable>
           );
         })()}
