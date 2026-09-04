@@ -204,6 +204,9 @@ const SEED = {
   attendance: [],
   laborPayments: [],
   customerReviews: [],
+  posSales: [],
+  posApiKey: null,
+  posSheetLink: null,
   users: [
     { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "payment", "reports", "admin"], branches: ["Store", "FB", "North", "BBQ"], kitchens: [], notifications: true },
     { id: "u2", name: "Ahmed", pin: "2233", permissions: ["purchase", "issue", "receive", "reports"], branches: ["Store"], kitchens: [], notifications: true },
@@ -331,6 +334,60 @@ app.post("/api/push/send", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to send notifications" });
+  }
+});
+
+// Receives sold-item quantities from an external POS (e.g. DesiFlow) and turns them into stock movements.
+// Body: { apiKey, branch, date (optional, defaults today), items: [{ name, qty }] }
+// For each sold item, if a Recipe exists mapping it to raw material, that raw material is deducted
+// (scaled to qty sold) as an Adjustment tagged "pos-sale". The raw sale is always logged either way.
+app.post("/api/pos/sales", async (req, res) => {
+  try {
+    const { apiKey, branch, date, items } = req.body;
+    if (!apiKey || !branch || !Array.isArray(items)) return res.status(400).json({ error: "apiKey, branch, and items required" });
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    if (!data.posApiKey || apiKey !== data.posApiKey) return res.status(401).json({ error: "Invalid API key" });
+
+    const saleDate = date || new Date().toISOString().slice(0, 10);
+    const uid = (p) => p + Math.random().toString(36).slice(2, 9);
+    const saleRecs = [];
+    const adjRecs = [];
+    let matchedRecipes = 0;
+
+    for (const row of items) {
+      if (!row || !row.name || !row.qty) continue;
+      const qty = Number(row.qty);
+      if (!qty) continue;
+      saleRecs.push({ id: uid("pos"), date: saleDate, branch, itemName: row.name, qty, source: "pos" });
+
+      const recipe = (data.recipes || []).find(r => (!r.branch || r.branch === branch) && r.produces.some(p => {
+        const item = data.items.find(i => i.id === p.itemId);
+        return item && item.name.toLowerCase() === row.name.toLowerCase();
+      }));
+      if (recipe) {
+        matchedRecipes++;
+        const producedEntry = recipe.produces.find(p => {
+          const item = data.items.find(i => i.id === p.itemId);
+          return item && item.name.toLowerCase() === row.name.toLowerCase();
+        });
+        const batches = qty / (producedEntry.qty || 1);
+        recipe.consumes.forEach(c => {
+          adjRecs.push({
+            id: uid("adj"), date: saleDate, branch, itemId: c.itemId, qty: -Math.abs(c.qty * batches),
+            kind: "pos-sale", reason: `POS sale: ${qty} × ${row.name} (recipe: ${recipe.name})`, userId: "pos",
+          });
+        });
+      }
+    }
+
+    data.posSales = [...saleRecs, ...(data.posSales || [])];
+    data.adjustments = [...adjRecs, ...(data.adjustments || [])];
+    await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true, received: saleRecs.length, recipesMatched: matchedRecipes, rawDeductions: adjRecs.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to record POS sales" });
   }
 });
 
