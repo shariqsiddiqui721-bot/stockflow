@@ -28,11 +28,12 @@ const uid = (p) => p + Math.random().toString(36).slice(2, 9);
 // Business day runs 9:00 AM to 6:00 AM the next calendar day.
 // Anything before 9 AM still counts as "yesterday's" business date.
 const pad2 = (n) => String(n).padStart(2, "0");
-const todayStr = () => {
-  const d = new Date();
+const businessDateOf = (input) => {
+  const d = new Date(input);
   if (d.getHours() < 9) d.setDate(d.getDate() - 1);
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 };
+const todayStr = () => businessDateOf(new Date());
 const nowStr = () => new Date().toLocaleString();
 const money = (n) => "Rs " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 
@@ -263,6 +264,37 @@ function categoriesForUser(db, session, kitchenItemIds) {
   const allowed = itemsForUser(db, session, db.items).filter(i => !kitchenItemIds || kitchenItemIds.includes(i.id));
   const cats = [...new Set(allowed.map(i => i.category))];
   return db.categories.filter(c => cats.includes(c));
+}
+
+// Pulls the DesiFlow Google Sheet ID out of a normal share link.
+function extractSheetId(url) {
+  const m = (url || "").match(/\/d\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+// Fetches one tab of a shared ("anyone with the link") Google Sheet as parsed rows (array of objects, keyed by header row).
+async function fetchGoogleSheetTab(sheetId, tabName) {
+  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Could not reach that sheet tab: " + tabName);
+  const text = await res.text();
+  const wb = XLSX.read(text, { type: "string" });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+}
+
+// "2 x Chicken Biryani, 1 x Naan" -> [{ name: "Chicken Biryani", qty: 2 }, { name: "Naan", qty: 1 }]
+function parseSoldItemsText(text) {
+  return String(text || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => {
+      const m = s.match(/^(\d+(?:\.\d+)?)\s*x\s*(.+)$/i);
+      if (!m) return null;
+      return { name: m[2].trim(), qty: Number(m[1]) };
+    })
+    .filter(Boolean);
 }
 
 // Reads a 2-column Excel/CSV file (Name, Amount/Qty) into [{name, value}]. Header row is auto-skipped
@@ -1474,7 +1506,9 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "POS Sales", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "POS Sales", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Activity Log"];
+const POS_BRANCH_MAP = { "Federal B Area": "FB", "North Nazimabad": "North" };
+const mapPosBranch = (b) => POS_BRANCH_MAP[b] || b;
 
 function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf, onBack }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
@@ -1534,13 +1568,75 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
     persist(next);
   };
 
-  // Opening balance for an item at a branch: stock as of the day before the given date.
+  // Opening balance for an item at a branch: the previous day's actual recorded Ending count
+  // (physical ground truth) if one was taken; otherwise falls back to the running purchases/issues/adjustments total.
   const openingOf = (branch, itemId, date) => {
     if (!date) return 0;
     const d = new Date(date + "T00:00:00");
     d.setDate(d.getDate() - 1);
     const prevDay = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    const prevEnding = db.endings.find(e => e.branch === branch && e.itemId === itemId && e.date === prevDay && !e.kitchenId);
+    if (prevEnding) return prevEnding.qty;
     return stockOf(branch, itemId, prevDay);
+  };
+
+  // ---- Live Google Sheet (DesiFlow POS) reports ----
+  const posSheetId = extractSheetId(db.posSheetLink);
+  const [posSalesRows, setPosSalesRows] = useState(null);
+  const [posVoidRows, setPosVoidRows] = useState(null);
+  const [posLoading, setPosLoading] = useState(false);
+  const [posError, setPosError] = useState(null);
+  const [expandedVoidItem, setExpandedVoidItem] = useState(null);
+  const [lossReasonFor, setLossReasonFor] = useState(null);
+  const [lossReasonText, setLossReasonText] = useState("");
+
+  const loadPosSales = async () => {
+    if (!posSheetId) { setPosError("No Google Sheet link saved yet — add one in Admin → POS."); return; }
+    setPosLoading(true); setPosError(null);
+    try { setPosSalesRows(await fetchGoogleSheetTab(posSheetId, "Sales")); }
+    catch (e) { setPosError("Couldn't load the Sales tab — check the sheet is shared \"Anyone with the link\"."); }
+    setPosLoading(false);
+  };
+  const loadPosVoid = async () => {
+    if (!posSheetId) { setPosError("No Google Sheet link saved yet — add one in Admin → POS."); return; }
+    setPosLoading(true); setPosError(null);
+    try { setPosVoidRows(await fetchGoogleSheetTab(posSheetId, "Reduced-Voided")); }
+    catch (e) { setPosError("Couldn't load the Reduced-Voided tab — check the sheet is shared \"Anyone with the link\"."); }
+    setPosLoading(false);
+  };
+  useEffect(() => {
+    if ((tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock") && !posSalesRows && !posLoading) loadPosSales();
+    if (tab === "POS Void/Less" && !posVoidRows && !posLoading) loadPosVoid();
+  }, [tab]);
+
+  const posSalesFiltered = (posSalesRows || []).filter(r => {
+    const bd = businessDateOf(r.Date);
+    if (dateFilter && bd !== dateFilter) return false;
+    const sfBranch = mapPosBranch(r.Branch);
+    if (!myBranches.includes(sfBranch) && r.Branch !== "ALL") return false;
+    return true;
+  });
+  const posVoidFiltered = (posVoidRows || []).filter(r => {
+    const bd = businessDateOf(r.Date);
+    if (dateFilter && bd !== dateFilter) return false;
+    const sfBranch = mapPosBranch(r.Branch);
+    if (!myBranches.includes(sfBranch) && r.Branch !== "ALL") return false;
+    return true;
+  });
+  const posItemQtySold = useMemo(() => {
+    const totals = {};
+    posSalesFiltered.forEach(r => {
+      parseSoldItemsText(r.Items).forEach(({ name, qty }) => { totals[name] = (totals[name] || 0) + qty; });
+    });
+    return totals;
+  }, [posSalesFiltered.length, dateFilter]);
+
+  const saveLossReason = (key, branch, itemId) => {
+    if (!lossReasonText.trim()) { flash("Enter a reason", "error"); return; }
+    const rec = { id: uid("plr"), date: dateFilter || todayStr(), branch, itemId, reason: lossReasonText.trim(), userId: session.id };
+    const next = { ...db, posLossReasons: [rec, ...(db.posLossReasons || [])] };
+    addLog(next, "POS Loss Reason", `${db.items.find(i => i.id === itemId)?.name} at ${branch}: ${lossReasonText.trim()}`);
+    persist(next); setLossReasonFor(null); setLossReasonText(""); flash("Reason recorded");
   };
 
   return (
@@ -1653,9 +1749,13 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             </ReportTable>
           );
         })()}
-        {tab === "Purchases" && (
-          <ReportTable title="Purchase History" onExport={() => downloadCSV("purchases.csv", toCSV(db.purchases, [{ label: "Date", get: p => p.date }, { label: "Item", get: p => itemName(p.itemId) }, { label: "Supplier", get: p => supplierName(p.supplierId) }, { label: "Qty", get: p => p.qty }, { label: "Rate", get: p => p.rate }, { label: "Amount", get: p => p.amount }, { label: "Payment", get: p => p.paymentMode || "credit" }]))}>
-            {db.purchases.filter(p => itemName(p.itemId).toLowerCase().includes(q.toLowerCase()) && (!dateFilter || p.date === dateFilter)).slice(0, 200).map(p => (
+        {tab === "Purchases" && (() => {
+          // Credit purchases arrive at Store; only someone with Store access should see them.
+          // Cash purchases are tagged with a branch directly.
+          const purchasesVisible = db.purchases.filter(p => (p.paymentMode === "cash" ? myBranches.includes(p.branch || "Store") : myBranches.includes("Store")));
+          return (
+          <ReportTable title="Purchase History" onExport={() => downloadCSV("purchases.csv", toCSV(purchasesVisible, [{ label: "Date", get: p => p.date }, { label: "Item", get: p => itemName(p.itemId) }, { label: "Supplier", get: p => supplierName(p.supplierId) }, { label: "Qty", get: p => p.qty }, { label: "Rate", get: p => p.rate }, { label: "Amount", get: p => p.amount }, { label: "Payment", get: p => p.paymentMode || "credit" }]))}>
+            {purchasesVisible.filter(p => itemName(p.itemId).toLowerCase().includes(q.toLowerCase()) && (!dateFilter || p.date === dateFilter)).slice(0, 200).map(p => (
               editPurchaseId === p.id ? (
                 <div key={p.id} className="bg-white rounded-xl p-3 mb-2 border-2 border-[#C98A2C]">
                   <div className="text-sm font-semibold mb-2">{itemName(p.itemId)} · {supplierName(p.supplierId)}</div>
@@ -1684,7 +1784,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
               )
             ))}
           </ReportTable>
-        )}
+          );
+        })()}
         {tab === "Cash Material" && (() => {
           const cashPurchases = db.purchases.filter(p => p.paymentMode === "cash" && itemName(p.itemId).toLowerCase().includes(q.toLowerCase()) && (!dateFilter || p.date === dateFilter));
           const byBranch = myBranches.map(b => ({ branch: b, list: cashPurchases.filter(p => (p.branch || "Store") === b) })).filter(g => g.list.length > 0);
@@ -2131,6 +2232,184 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                 </tbody>
               </table>
               {sales.length === 0 && <div className="text-sm text-[#8A9690]">No POS sales{dateFilter ? " on this date" : ""} yet.</div>}
+            </ReportTable>
+          );
+        })()}
+        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && !posSheetId && (
+          <div className="bg-white rounded-xl p-4 border border-[#EAE4D4] text-sm text-[#8A9690]">No Google Sheet link saved yet — add one in Admin → POS.</div>
+        )}
+        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSheetId && posLoading && (
+          <div className="bg-white rounded-xl p-4 border border-[#EAE4D4] text-sm text-[#8A9690]">Loading from the sheet…</div>
+        )}
+        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSheetId && posError && (
+          <div className="bg-[#FBEAEA] rounded-xl p-4 border-2 border-[#B33A3A] text-sm text-[#B33A3A] mb-3">{posError}</div>
+        )}
+        {tab === "POS Sale" && posSheetId && !posLoading && posSalesRows && (() => {
+          const byGroup = {};
+          posSalesFiltered.forEach(r => {
+            const bd = businessDateOf(r.Date);
+            const sfBranch = mapPosBranch(r.Branch);
+            const key = bd + "|" + sfBranch;
+            if (!byGroup[key]) byGroup[key] = { date: bd, branch: sfBranch, sale: 0, discount: 0, orders: 0 };
+            byGroup[key].sale += Number(r["Grand Total"]) || 0;
+            byGroup[key].discount += Number(r.Discount) || 0;
+            byGroup[key].orders += 1;
+          });
+          const rows = Object.values(byGroup).sort((a, b) => a.date < b.date ? 1 : -1);
+          const totalSale = rows.reduce((a, r) => a + r.sale, 0);
+          const totalDiscount = rows.reduce((a, r) => a + r.discount, 0);
+          return (
+            <ReportTable
+              title={dateFilter ? `POS Sale — ${dateFilter}` : "POS Sale — All Loaded Dates"}
+              onExport={() => downloadCSV("pos-sale.csv", toCSV(rows, [
+                { label: "Date", get: r => r.date }, { label: "Branch", get: r => r.branch },
+                { label: "Sale", get: r => r.sale }, { label: "Discount", get: r => r.discount }, { label: "Orders", get: r => r.orders },
+              ]))}
+            >
+              <div className="grid grid-cols-2 gap-2 mb-3">
+                <div className="bg-[#F7F5F0] rounded-lg p-2.5 text-center">
+                  <div className="text-[10px] uppercase text-[#8A9690] font-semibold">Total Sale</div>
+                  <div className="font-mono font-bold">{money(totalSale)}</div>
+                </div>
+                <div className="bg-[#F7F5F0] rounded-lg p-2.5 text-center">
+                  <div className="text-[10px] uppercase text-[#8A9690] font-semibold">Total Discount</div>
+                  <div className="font-mono font-bold">{money(totalDiscount)}</div>
+                </div>
+              </div>
+              {rows.map((r, idx) => (
+                <div key={idx} className="flex justify-between items-center py-2 border-t border-[#EFEBDF] first:border-t-0">
+                  <div className="text-sm"><b>{r.branch}</b> <span className="text-[#8A9690]">· {r.date} · {r.orders} order(s)</span></div>
+                  <div className="text-right">
+                    <div className="font-mono font-bold text-sm">{money(r.sale)}</div>
+                    <div className="text-[11px] text-[#B3562C]">−{money(r.discount)} discount</div>
+                  </div>
+                </div>
+              ))}
+              {rows.length === 0 && <div className="text-sm text-[#8A9690]">No sales in range — try widening or clearing the date filter.</div>}
+            </ReportTable>
+          );
+        })()}
+        {tab === "POS Void/Less" && posSheetId && !posLoading && posVoidRows && (() => {
+          const byItem = {};
+          posVoidFiltered.forEach(r => {
+            const name = r.Item || "—";
+            if (!byItem[name]) byItem[name] = { name, qty: 0, amount: 0, rows: [] };
+            byItem[name].qty += Number(r.Qty) || 0;
+            byItem[name].amount += Number(r.Amount) || 0;
+            byItem[name].rows.push(r);
+          });
+          const rows = Object.values(byItem).sort((a, b) => b.amount - a.amount);
+          const totalAmount = rows.reduce((a, r) => a + r.amount, 0);
+          return (
+            <ReportTable
+              title={dateFilter ? `Item Less / Void — ${dateFilter}` : "Item Less / Void — All Loaded Dates"}
+              onExport={() => downloadCSV("pos-void.csv", toCSV(posVoidFiltered, [
+                { label: "Type", get: r => r.Type }, { label: "Item", get: r => r.Item }, { label: "Qty", get: r => r.Qty }, { label: "Amount", get: r => r.Amount },
+                { label: "Done By", get: r => r["Done By"] }, { label: "Reason", get: r => r.Reason }, { label: "Branch", get: r => r.Branch }, { label: "Date", get: r => r.Date },
+              ]))}
+            >
+              <div className="text-sm font-semibold text-[#B33A3A] mb-3">Total: {money(totalAmount)}</div>
+              {rows.map(r => (
+                <div key={r.name} className="border-t border-[#EFEBDF] first:border-t-0">
+                  <button onClick={() => setExpandedVoidItem(expandedVoidItem === r.name ? null : r.name)} className="w-full flex justify-between items-center py-2.5 text-left">
+                    <span className="text-sm font-medium">{r.name} <span className="text-[#8A9690]">· qty {r.qty}</span></span>
+                    <span className="font-mono font-bold text-sm text-[#B33A3A]">{money(r.amount)}</span>
+                  </button>
+                  {expandedVoidItem === r.name && (
+                    <div className="pb-2.5 pl-2 border-l-2 border-[#EAE4D4]">
+                      {r.rows.map((row, idx) => (
+                        <div key={idx} className="text-[11px] text-[#5C6B62] py-1 border-b border-[#F0ECE0] last:border-b-0">
+                          <b className="capitalize">{row.Type}</b> · qty {row.Qty} · {money(row.Amount)} · {row["Done By"]}{row.Reason ? " · " + row.Reason : ""} · {row.Branch} {row.Table ? "T" + row.Table : ""} · {row.Waiter} · {String(row.Date).slice(0, 16).replace("T", " ")}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {rows.length === 0 && <div className="text-sm text-[#8A9690]">No less/void entries in range.</div>}
+            </ReportTable>
+          );
+        })()}
+        {tab === "POS Item Sale" && posSheetId && !posLoading && posSalesRows && (() => {
+          const rows = Object.entries(posItemQtySold).sort((a, b) => b[1] - a[1]).filter(([name]) => name.toLowerCase().includes(q.toLowerCase()));
+          return (
+            <ReportTable
+              title={dateFilter ? `Item-wise Sale — ${dateFilter}` : "Item-wise Sale — All Loaded Dates"}
+              onExport={() => downloadCSV("pos-item-sale.csv", toCSV(rows, [{ label: "Item", get: r => r[0] }, { label: "Qty Sold", get: r => r[1] }]))}
+            >
+              <table className="w-full text-sm">
+                <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Qty Sold</th></tr></thead>
+                <tbody>
+                  {rows.map(([name, qty]) => (
+                    <tr key={name} className="border-t border-[#EFEBDF]"><td className="py-2 font-medium">{name}</td><td className="text-right py-2 font-mono">{qty}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+              {rows.length === 0 && <div className="text-sm text-[#8A9690] mt-2">No items in range.</div>}
+            </ReportTable>
+          );
+        })()}
+        {tab === "POS vs Stock" && posSheetId && !posLoading && posSalesRows && (() => {
+          const eff = dateFilter || todayStr();
+          const rows = [];
+          myBranches.forEach(branch => {
+            (db.recipes || []).forEach(recipe => {
+              if (recipe.branch && recipe.branch !== branch) return;
+              recipe.produces.forEach(p => {
+                const item = db.items.find(i => i.id === p.itemId);
+                if (!item) return;
+                const soldQty = posItemQtySold[item.name] || Object.entries(posItemQtySold).find(([n]) => n.toLowerCase() === item.name.toLowerCase())?.[1] || 0;
+                if (soldQty === 0) return;
+                const batches = soldQty / (p.qty || 1);
+                recipe.consumes.forEach(c => {
+                  const rawItem = db.items.find(i => i.id === c.itemId);
+                  if (!rawItem) return;
+                  const posCalc = c.qty * batches;
+                  const ending = db.endings.find(e => e.branch === branch && e.itemId === c.itemId && e.date === eff && !e.kitchenId);
+                  const opening = openingOf(branch, c.itemId, eff);
+                  const received = db.issues.filter(x => x.itemId === c.itemId && x.to === branch && x.date === eff).reduce((a, x) => a + x.qty, 0);
+                  const actual = ending ? opening + received - ending.qty : null;
+                  const diff = actual === null ? null : posCalc - actual;
+                  rows.push({ branch, rawItem, soldItemName: item.name, soldQty, posCalc, actual, diff, recipe });
+                });
+              });
+            });
+          });
+          const key = (r) => r.branch + "|" + r.rawItem.id;
+          return (
+            <ReportTable
+              title={`POS vs StockFlow — ${eff}`}
+              onExport={() => downloadCSV("pos-vs-stock.csv", toCSV(rows, [
+                { label: "Branch", get: r => r.branch }, { label: "Raw Item", get: r => r.rawItem.name }, { label: "Sold Item", get: r => r.soldItemName },
+                { label: "Qty Sold", get: r => r.soldQty }, { label: "POS Calc Use", get: r => r.posCalc.toFixed(2) },
+                { label: "Actual Use", get: r => r.actual === null ? "no ending count" : r.actual }, { label: "Difference", get: r => r.diff === null ? "" : r.diff.toFixed(2) },
+              ]))}
+            >
+              {rows.length === 0 && <div className="text-sm text-[#8A9690]">No recipe-matched sales for this date yet — set up Recipes in Admin for the items you want tracked (disposables, BBQ, rice, meats).</div>}
+              {rows.map((r, idx) => (
+                <div key={idx} className="py-2.5 border-t border-[#EFEBDF] first:border-t-0">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-sm font-semibold">{r.rawItem.name} <span className="text-[#8A9690] font-normal">· {r.branch}</span></span>
+                    {r.diff !== null && (
+                      <span className={`text-xs font-bold ${r.diff >= 0 ? "text-[#2B6E63]" : "text-[#B33A3A]"}`}>{r.diff >= 0 ? "Surplus " : "Loss "}{money(Math.abs(r.diff))}</span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-[#8A9690]">{r.soldQty} × {r.soldItemName} → recipe needs {r.posCalc.toFixed(2)} {r.rawItem.unit} · StockFlow actual: {r.actual === null ? "no ending count yet" : `${r.actual} ${r.rawItem.unit}`}</div>
+                  {r.diff !== null && r.diff < 0 && (
+                    lossReasonFor === key(r) ? (
+                      <div className="flex gap-2 mt-2">
+                        <input className={numCls + " font-sans"} placeholder="Reason for the extra usage" value={lossReasonText} onChange={e => setLossReasonText(e.target.value)} />
+                        <button onClick={() => saveLossReason(key(r), r.branch, r.rawItem.id)} className="bg-[#C98A2C] text-white px-3 rounded-xl font-semibold whitespace-nowrap">Save</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => { setLossReasonFor(key(r)); setLossReasonText(""); }} className="text-[10px] font-semibold text-[#B33A3A] bg-[#B33A3A]/10 px-2.5 py-1 rounded-full mt-1.5">Record Reason</button>
+                    )
+                  )}
+                  {(db.posLossReasons || []).filter(l => l.branch === r.branch && l.itemId === r.rawItem.id && l.date === eff).map(l => (
+                    <div key={l.id} className="text-[11px] text-[#5C6B62] mt-1 italic">Noted: {l.reason}</div>
+                  ))}
+                </div>
+              ))}
             </ReportTable>
           );
         })()}
