@@ -566,6 +566,8 @@ function MainMenu({ db, session, persist, onLogout, setScreen }) {
 
 function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const canBackdate = session.canBackdate || (session.permissions || []).includes("admin");
+  const [entryDate, setEntryDate] = useState(todayStr());
   const [supplierId, setSupplierId] = useState(db.suppliers[0]?.id || "");
   const [category, setCategory] = useState("");
   const [cashBranch, setCashBranch] = useState(myBranches[0]);
@@ -646,7 +648,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
     if (categoriesNeedingToday.length > 0) { flash("Set today's rate for: " + categoriesNeedingToday.join(", "), "error"); return; }
     const recs = entries.map(([itemId, r]) => {
       const qty = Number(r.qty), rate = Number(r.rate);
-      return { id: uid("p"), date: todayStr(), itemId, supplierId, qty, rate, amount: qty * rate, paymentMode: payMode, branch: payMode === "cash" ? cashBranch : null, userId: session.id };
+      return { id: uid("p"), date: entryDate, itemId, supplierId, qty, rate, amount: qty * rate, paymentMode: payMode, branch: payMode === "cash" ? cashBranch : null, userId: session.id };
     });
     const next = { ...db, purchases: [...recs, ...db.purchases] };
     addLog(next, "Purchase", `${supplier.name}: ${recs.length} item(s), bill ${money(total)} (${payMode})`);
@@ -660,6 +662,11 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
     <div>
       <TopBar title="Purchase" onBack={onDone} />
       <div className="p-5">
+        {canBackdate && (
+          <Field label="Date">
+            <input type="date" className={selCls} value={entryDate} onChange={e => setEntryDate(e.target.value)} max={todayStr()} />
+          </Field>
+        )}
         <Field label="Supplier">
           <select className={selCls} value={supplierId} onChange={e => setSupplierId(e.target.value)}>
             {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -814,6 +821,8 @@ function RecipeItemList({ db, list, onAdd, onRemove, addItemId, setAddItemId, ad
 
 function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const canBackdate = session.canBackdate || (session.permissions || []).includes("admin");
+  const [entryDate, setEntryDate] = useState(todayStr());
   const [from, setFrom] = useState(myBranches[0]);
   const [to, setTo] = useState(BRANCHES.find(b => b !== myBranches[0]) || BRANCHES[1]);
   const toKitchens = kitchensOf(db, to);
@@ -831,7 +840,7 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
     if (from === to) { flash("From and To must differ", "error"); return; }
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
     if (anyOver) { flash("Not enough stock for one or more items", "error"); return; }
-    const recs = entries.map(([itemId, v]) => ({ id: uid("iss"), date: todayStr(), ts: Date.now(), from, to, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
+    const recs = entries.map(([itemId, v]) => ({ id: uid("iss"), date: entryDate, ts: Date.now(), from, to, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
     const next = { ...db, issues: [...recs, ...db.issues] };
     const kName = toKitchens.find(k => k.id === kitchenId)?.name;
     addLog(next, "Issue", `${from} → ${to}${kName ? " (" + kName + ")" : ""}: ${entries.length} item(s)`);
@@ -844,6 +853,11 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
     <div>
       <TopBar title="Issue" onBack={onDone} />
       <div className="p-5">
+        {canBackdate && (
+          <Field label="Date">
+            <input type="date" className={selCls} value={entryDate} onChange={e => setEntryDate(e.target.value)} max={todayStr()} />
+          </Field>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Field label="Issue From"><select className={selCls} value={from} onChange={e => setFrom(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
           <Field label="Issue To"><select className={selCls} value={to} onChange={e => setTo(e.target.value)}>{BRANCHES.filter(b => b !== from).map(b => <option key={b}>{b}</option>)}</select></Field>
@@ -869,6 +883,8 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
 
 function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const canBackdate = session.canBackdate || (session.permissions || []).includes("admin");
+  const [entryDate, setEntryDate] = useState(todayStr());
   const [branch, setBranch] = useState(myBranches[0]);
   const myKitchens = myKitchensFor(db, session, branch);
   const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
@@ -886,7 +902,7 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
   const save = () => {
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
     if (myKitchens.length > 0 && !kitchenId) { flash("Select a kitchen", "error"); return; }
-    const recs = entries.map(([itemId, v]) => ({ id: uid("end"), date: todayStr(), branch, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
+    const recs = entries.map(([itemId, v]) => ({ id: uid("end"), date: entryDate, branch, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
     const next = { ...db, endings: [...recs, ...db.endings] };
     const kName = myKitchens.find(k => k.id === kitchenId)?.name;
     addLog(next, "Ending", `${branch}${kName ? " — " + kName : ""}: ${entries.length} item(s)`);
@@ -899,6 +915,11 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
     <div>
       <TopBar title="Ending" onBack={onDone} />
       <div className="p-5">
+        {canBackdate && (
+          <Field label="Date">
+            <input type="date" className={selCls} value={entryDate} onChange={e => setEntryDate(e.target.value)} max={todayStr()} />
+          </Field>
+        )}
         <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
         {myKitchens.length > 0 && (
           <Field label="Kitchen">
@@ -920,6 +941,8 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
 
 function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const canBackdate = session.canBackdate || (session.permissions || []).includes("admin");
+  const [entryDate, setEntryDate] = useState(todayStr());
   const [branch, setBranch] = useState(myBranches[0]);
   const myCategories = categoriesForUser(db, session, null);
   const [category, setCategory] = useState(myCategories[0] || db.categories[0]);
@@ -934,7 +957,7 @@ function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone
   const save = () => {
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
     const recs = entries.map(([itemId, v]) => ({
-      id: uid("adj"), date: todayStr(), branch, itemId,
+      id: uid("adj"), date: entryDate, branch, itemId,
       qty: isLoss ? -Math.abs(Number(v)) : Math.abs(Number(v)),
       kind, reason: reason.trim(), userId: session.id,
     }));
@@ -949,6 +972,11 @@ function AdjustmentScreen({ db, session, persist, addLog, flash, stockOf, onDone
     <div>
       <TopBar title="Adjustment" onBack={onDone} />
       <div className="p-5">
+        {canBackdate && (
+          <Field label="Date">
+            <input type="date" className={selCls} value={entryDate} onChange={e => setEntryDate(e.target.value)} max={todayStr()} />
+          </Field>
+        )}
         <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
         <Field label="Type">
           <div className="grid grid-cols-4 gap-1.5">
@@ -1331,6 +1359,8 @@ function ConfirmReceiptScreen({ db, session, persist, addLog, flash, onDone }) {
 
 function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const canBackdate = session.canBackdate || (session.permissions || []).includes("admin");
+  const [entryDate, setEntryDate] = useState(demandDateStr());
   const [branch, setBranch] = useState(myBranches[0]);
   const myKitchens = myKitchensFor(db, session, branch);
   const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
@@ -1348,7 +1378,7 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
   const save = () => {
     if (entries.length === 0) { flash("Enter at least one quantity", "error"); return; }
     if (myKitchens.length > 0 && !kitchenId) { flash("Select a kitchen", "error"); return; }
-    const recs = entries.map(([itemId, v]) => ({ id: uid("dem"), date: demandDateStr(), ts: Date.now(), branch, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
+    const recs = entries.map(([itemId, v]) => ({ id: uid("dem"), date: entryDate, ts: Date.now(), branch, kitchenId: kitchenId || null, itemId, qty: Number(v), userId: session.id }));
     const next = { ...db, demands: [...recs, ...db.demands] };
     const kName = myKitchens.find(k => k.id === kitchenId)?.name;
     addLog(next, "Demand", `${branch}${kName ? " — " + kName : ""}: ${entries.length} item(s)`);
@@ -1361,6 +1391,11 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
     <div>
       <TopBar title="Demand" onBack={onDone} />
       <div className="p-5">
+        {canBackdate && (
+          <Field label="Date">
+            <input type="date" className={selCls} value={entryDate} onChange={e => setEntryDate(e.target.value)} max={demandDateStr()} />
+          </Field>
+        )}
         <Field label="Branch"><select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select></Field>
         {myKitchens.length > 0 && (
           <Field label="Kitchen">
@@ -2113,6 +2148,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newSupplierName, setNewSupplierName] = useState("");
   const [newSupplierItems, setNewSupplierItems] = useState([]);
   const [newSupplierOpening, setNewSupplierOpening] = useState("");
+  const [newSupplierOpeningDate, setNewSupplierOpeningDate] = useState(todayStr());
   const [newUserName, setNewUserName] = useState("");
   const [newUserPin, setNewUserPin] = useState("");
   const [newUserPerms, setNewUserPerms] = useState(["purchase"]);
@@ -2121,6 +2157,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newUserKitchens, setNewUserKitchens] = useState([]);
   const [newUserItemIds, setNewUserItemIds] = useState([]);
   const [newUserNotifications, setNewUserNotifications] = useState(true);
+  const [newUserBackdate, setNewUserBackdate] = useState(false);
   const [newKitchenName, setNewKitchenName] = useState("");
   const [newKitchenBranch, setNewKitchenBranch] = useState(BRANCHES.find(b => b !== "Store") || BRANCHES[0]);
   const [newKitchenItems, setNewKitchenItems] = useState([]);
@@ -2155,10 +2192,10 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next); setEditItemId(null); flash("Item updated");
   };
 
-  const addSupplier = () => { if (!newSupplierName.trim()) return; const rec = { id: uid("s"), name: newSupplierName.trim(), itemIds: newSupplierItems, openingBalance: Number(newSupplierOpening) || 0 }; const next = { ...db, suppliers: [...db.suppliers, rec] }; addLog(next, "Admin", `Added supplier ${rec.name}`); persist(next); setNewSupplierName(""); setNewSupplierItems([]); setNewSupplierOpening(""); flash("Supplier added"); };
+  const addSupplier = () => { if (!newSupplierName.trim()) return; const rec = { id: uid("s"), name: newSupplierName.trim(), itemIds: newSupplierItems, openingBalance: Number(newSupplierOpening) || 0, openingDate: newSupplierOpeningDate }; const next = { ...db, suppliers: [...db.suppliers, rec] }; addLog(next, "Admin", `Added supplier ${rec.name}`); persist(next); setNewSupplierName(""); setNewSupplierItems([]); setNewSupplierOpening(""); setNewSupplierOpeningDate(todayStr()); flash("Supplier added"); };
   const delSupplier = (id) => persist({ ...db, suppliers: db.suppliers.filter(s => s.id !== id) });
   const toggleSupplierItem = (id) => setNewSupplierItems(v => v.includes(id) ? v.filter(x => x !== id) : [...v, id]);
-  const startEditSupplier = (s) => { setEditSupplierId(s.id); setEditSupplierDraft({ name: s.name, itemIds: [...s.itemIds], openingBalance: s.openingBalance || 0 }); };
+  const startEditSupplier = (s) => { setEditSupplierId(s.id); setEditSupplierDraft({ name: s.name, itemIds: [...s.itemIds], openingBalance: s.openingBalance || 0, openingDate: s.openingDate || todayStr() }); };
   const toggleEditSupplierItem = (id) => setEditSupplierDraft(d => ({ ...d, itemIds: d.itemIds.includes(id) ? d.itemIds.filter(x => x !== id) : [...d.itemIds, id] }));
   const saveEditSupplier = () => {
     const next = { ...db, suppliers: db.suppliers.map(s => s.id === editSupplierId ? { ...s, ...editSupplierDraft } : s) };
@@ -2166,7 +2203,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     persist(next); setEditSupplierId(null); flash("Supplier updated");
   };
 
-  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens, itemIds: newUserItemIds, notifications: newUserNotifications }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); setNewUserItemIds([]); setNewUserNotifications(true); flash("User added"); };
+  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens, itemIds: newUserItemIds, notifications: newUserNotifications, canBackdate: newUserBackdate }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); setNewUserItemIds([]); setNewUserNotifications(true); setNewUserBackdate(false); flash("User added"); };
   const delUser = (id) => persist({ ...db, users: db.users.filter(u => u.id !== id) });
   const toggleUserPerm = (userId, perm) => {
     const next = { ...db, users: db.users.map(u => {
@@ -2203,6 +2240,10 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   };
   const toggleUserNotifications = (userId) => {
     const next = { ...db, users: db.users.map(u => u.id === userId ? { ...u, notifications: u.notifications === false } : u) };
+    persist(next);
+  };
+  const toggleUserBackdate = (userId) => {
+    const next = { ...db, users: db.users.map(u => u.id === userId ? { ...u, canBackdate: !u.canBackdate } : u) };
     persist(next);
   };
 
@@ -2258,15 +2299,16 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const openingKitchenItemIds = openingActiveKitchen && openingActiveKitchen.itemIds && openingActiveKitchen.itemIds.length ? openingActiveKitchen.itemIds : null;
   const [openingCat, setOpeningCat] = useState(db.categories[0]);
   const [openingValues, setOpeningValues] = useState(() => ({ ...(db.openingStock?.[openingBranch] || {}) }));
-  useEffect(() => { setOpeningValues({ ...(db.openingStock?.[openingBranch] || {}) }); setOpeningKitchenId(""); }, [openingBranch]);
+  const [openingStockDate, setOpeningStockDate] = useState(db.openingStockDate?.[openingBranch] || todayStr());
+  useEffect(() => { setOpeningValues({ ...(db.openingStock?.[openingBranch] || {}) }); setOpeningKitchenId(""); setOpeningStockDate(db.openingStockDate?.[openingBranch] || todayStr()); }, [openingBranch]);
   const saveOpeningStock = () => {
     const cleaned = { ...(db.openingStock?.[openingBranch] || {}) };
     Object.entries(openingValues).forEach(([id, v]) => {
       if (v === "" || v === undefined || Number(v) === 0) delete cleaned[id];
       else cleaned[id] = Number(v);
     });
-    const next = { ...db, openingStock: { ...db.openingStock, [openingBranch]: cleaned } };
-    addLog(next, "Admin", `Set opening stock for ${openingBranch}${openingActiveKitchen ? " (" + openingActiveKitchen.name + " items)" : ""}`);
+    const next = { ...db, openingStock: { ...db.openingStock, [openingBranch]: cleaned }, openingStockDate: { ...db.openingStockDate, [openingBranch]: openingStockDate } };
+    addLog(next, "Admin", `Set opening stock for ${openingBranch}${openingActiveKitchen ? " (" + openingActiveKitchen.name + " items)" : ""} as of ${openingStockDate}`);
     persist(next); flash("Opening stock saved");
   };
   const uploadOpeningStock = (rows) => {
@@ -2277,8 +2319,8 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
       if (item) { cleaned[item.id] = row.value; matched++; }
     });
     const unmatched = rows.length - matched;
-    const next = { ...db, openingStock: { ...db.openingStock, [openingBranch]: cleaned } };
-    addLog(next, "Admin", `Uploaded opening stock for ${openingBranch}: ${matched} matched, ${unmatched} not found`);
+    const next = { ...db, openingStock: { ...db.openingStock, [openingBranch]: cleaned }, openingStockDate: { ...db.openingStockDate, [openingBranch]: openingStockDate } };
+    addLog(next, "Admin", `Uploaded opening stock for ${openingBranch} as of ${openingStockDate}: ${matched} matched, ${unmatched} not found`);
     persist(next);
     setOpeningValues(cleaned);
     flash(`Updated ${matched} item(s)${unmatched ? `, ${unmatched} name(s) not found` : ""}`);
@@ -2290,20 +2332,21 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [newLaborWage, setNewLaborWage] = useState("");
   const [newLaborBranch, setNewLaborBranch] = useState("");
   const [newLaborOpening, setNewLaborOpening] = useState("");
+  const [newLaborOpeningDate, setNewLaborOpeningDate] = useState(todayStr());
   const [editLaborId, setEditLaborId] = useState(null);
   const [editLaborDraft, setEditLaborDraft] = useState({});
   const [laborUploadBranch, setLaborUploadBranch] = useState("");
   const addLabor = () => {
     if (!newLaborName.trim() || !newLaborWage || Number(newLaborWage) <= 0) { flash("Name and daily wage required", "error"); return; }
-    const rec = { id: uid("lab"), name: newLaborName.trim(), nic: newLaborNic.trim(), phone: newLaborPhone.trim(), dailyWage: Number(newLaborWage), branch: newLaborBranch || null, openingDue: Number(newLaborOpening) || 0, active: true };
+    const rec = { id: uid("lab"), name: newLaborName.trim(), nic: newLaborNic.trim(), phone: newLaborPhone.trim(), dailyWage: Number(newLaborWage), branch: newLaborBranch || null, openingDue: Number(newLaborOpening) || 0, openingDate: newLaborOpeningDate, active: true };
     const next = { ...db, labors: [...(db.labors || []), rec] };
     addLog(next, "Admin", `Added labor ${rec.name}`);
-    persist(next); setNewLaborName(""); setNewLaborNic(""); setNewLaborPhone(""); setNewLaborWage(""); setNewLaborBranch(""); setNewLaborOpening(""); flash("Labor added");
+    persist(next); setNewLaborName(""); setNewLaborNic(""); setNewLaborPhone(""); setNewLaborWage(""); setNewLaborBranch(""); setNewLaborOpening(""); setNewLaborOpeningDate(todayStr()); flash("Labor added");
   };
   const delLabor = (id) => persist({ ...db, labors: (db.labors || []).filter(l => l.id !== id) });
-  const startEditLabor = (l) => { setEditLaborId(l.id); setEditLaborDraft({ name: l.name, nic: l.nic || "", phone: l.phone || "", dailyWage: l.dailyWage, branch: l.branch || "", openingDue: l.openingDue || 0 }); };
+  const startEditLabor = (l) => { setEditLaborId(l.id); setEditLaborDraft({ name: l.name, nic: l.nic || "", phone: l.phone || "", dailyWage: l.dailyWage, branch: l.branch || "", openingDue: l.openingDue || 0, openingDate: l.openingDate || todayStr() }); };
   const saveEditLabor = () => {
-    const next = { ...db, labors: (db.labors || []).map(l => l.id === editLaborId ? { ...l, name: editLaborDraft.name.trim(), nic: editLaborDraft.nic.trim(), phone: editLaborDraft.phone.trim(), dailyWage: Number(editLaborDraft.dailyWage) || 0, branch: editLaborDraft.branch || null, openingDue: Number(editLaborDraft.openingDue) || 0 } : l) };
+    const next = { ...db, labors: (db.labors || []).map(l => l.id === editLaborId ? { ...l, name: editLaborDraft.name.trim(), nic: editLaborDraft.nic.trim(), phone: editLaborDraft.phone.trim(), dailyWage: Number(editLaborDraft.dailyWage) || 0, branch: editLaborDraft.branch || null, openingDue: Number(editLaborDraft.openingDue) || 0, openingDate: editLaborDraft.openingDate } : l) };
     addLog(next, "Admin", `Edited labor ${editLaborDraft.name}`);
     persist(next); setEditLaborId(null); flash("Labor updated");
   };
@@ -2312,11 +2355,11 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     const next = { ...db, labors: (db.labors || []).map(l => {
       if (laborUploadBranch && l.branch !== laborUploadBranch) return l;
       const row = rows.find(r => r.name.toLowerCase() === l.name.toLowerCase());
-      if (row) { matched++; return { ...l, openingDue: row.value }; }
+      if (row) { matched++; return { ...l, openingDue: row.value, openingDate: newLaborOpeningDate }; }
       return l;
     }) };
     const unmatched = rows.length - matched;
-    addLog(next, "Admin", `Uploaded labor opening due${laborUploadBranch ? " for " + laborUploadBranch : ""}: ${matched} matched, ${unmatched} not found`);
+    addLog(next, "Admin", `Uploaded labor opening due (as of ${newLaborOpeningDate})${laborUploadBranch ? " for " + laborUploadBranch : ""}: ${matched} matched, ${unmatched} not found`);
     persist(next);
     flash(`Updated ${matched} labor(s)${unmatched ? `, ${unmatched} name(s) not found` : ""}`);
   };
@@ -2384,8 +2427,16 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
           <React.Fragment>
             <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
               <input className={numCls + " font-sans mb-2"} placeholder="Supplier name" value={newSupplierName} onChange={e => setNewSupplierName(e.target.value)} />
-              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening balance (owed before using this app, 0 if none)</div>
-              <input className={numCls + " mb-2"} type="number" placeholder="0" value={newSupplierOpening} onChange={e => setNewSupplierOpening(e.target.value)} />
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <div>
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening balance (0 if none)</div>
+                  <input className={numCls} type="number" placeholder="0" value={newSupplierOpening} onChange={e => setNewSupplierOpening(e.target.value)} />
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">As of date</div>
+                  <input className={selCls} type="date" value={newSupplierOpeningDate} onChange={e => setNewSupplierOpeningDate(e.target.value)} />
+                </div>
+              </div>
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Linked items</div>
               <div className="flex flex-wrap gap-1.5 mb-2">
                 {db.items.map(i => (
@@ -2396,15 +2447,17 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
             </div>
             <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Upload opening balances (Excel/CSV: col A = supplier name, col B = amount owed)</div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">As of date</div>
+              <input className={selCls + " mb-2"} type="date" value={newSupplierOpeningDate} onChange={e => setNewSupplierOpeningDate(e.target.value)} />
               <FileUploadRow flash={flash} onRows={(rows) => {
                 let matched = 0, unmatched = 0;
                 const next = { ...db, suppliers: db.suppliers.map(s => {
                   const row = rows.find(r => r.name.toLowerCase() === s.name.toLowerCase());
-                  if (row) { matched++; return { ...s, openingBalance: row.value }; }
+                  if (row) { matched++; return { ...s, openingBalance: row.value, openingDate: newSupplierOpeningDate }; }
                   return s;
                 }) };
                 unmatched = rows.length - matched;
-                addLog(next, "Admin", `Uploaded opening balances: ${matched} matched, ${unmatched} not found`);
+                addLog(next, "Admin", `Uploaded opening balances (as of ${newSupplierOpeningDate}): ${matched} matched, ${unmatched} not found`);
                 persist(next);
                 flash(`Updated ${matched} supplier(s)${unmatched ? `, ${unmatched} name(s) not found` : ""}`);
               }} />
@@ -2413,8 +2466,16 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               editSupplierId === s.id ? (
                 <div key={s.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
                   <input className={numCls + " font-sans mb-2"} value={editSupplierDraft.name} onChange={e => setEditSupplierDraft(d => ({ ...d, name: e.target.value }))} />
-                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening balance</div>
-                  <input className={numCls + " mb-2"} type="number" value={editSupplierDraft.openingBalance} onChange={e => setEditSupplierDraft(d => ({ ...d, openingBalance: Number(e.target.value) || 0 }))} />
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <div>
+                      <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening balance</div>
+                      <input className={numCls} type="number" value={editSupplierDraft.openingBalance} onChange={e => setEditSupplierDraft(d => ({ ...d, openingBalance: Number(e.target.value) || 0 }))} />
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">As of date</div>
+                      <input className={selCls} type="date" value={editSupplierDraft.openingDate} onChange={e => setEditSupplierDraft(d => ({ ...d, openingDate: e.target.value }))} />
+                    </div>
+                  </div>
                   <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Linked items</div>
                   <div className="flex flex-wrap gap-1.5 mb-2 max-h-40 overflow-y-auto">
                     {db.items.map(i => (
@@ -2428,7 +2489,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 </div>
               ) : (
                 <div key={s.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
-                  <span className="text-sm"><b>{s.name}</b> <span className="text-[#8A9690]">· {s.itemIds.length} item(s){s.openingBalance ? ` · opening ${money(s.openingBalance)}` : ""}</span></span>
+                  <span className="text-sm"><b>{s.name}</b> <span className="text-[#8A9690]">· {s.itemIds.length} item(s){s.openingBalance ? ` · opening ${money(s.openingBalance)} (${s.openingDate || "—"})` : ""}</span></span>
                   <div className="flex items-center gap-3">
                     <button onClick={() => startEditSupplier(s)} className="text-[#5C6B62]">✎</button>
                     <button onClick={() => delSupplier(s.id)} className="text-[#B33A3A]">✕</button>
@@ -2489,6 +2550,10 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 {openingKitchenOptions.map(k => <option key={k.id} value={k.id}>{k.name} items only</option>)}
               </select>
             )}
+            <div className="mb-3">
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">As of date</div>
+              <input className={selCls} type="date" value={openingStockDate} onChange={e => setOpeningStockDate(e.target.value)} />
+            </div>
             <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Upload opening stock (Excel/CSV: col A = item name, col B = qty) — for {openingBranch}{openingActiveKitchen ? ` / ${openingActiveKitchen.name}` : ""}</div>
               <FileUploadRow flash={flash} onRows={uploadOpeningStock} />
@@ -2633,16 +2698,27 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                   {BRANCHES.map(b => <option key={b}>{b}</option>)}
                 </select>
               </div>
-              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening due (owed before using this app, 0 if none)</div>
-              <input className={numCls} type="number" placeholder="0" value={newLaborOpening} onChange={e => setNewLaborOpening(e.target.value)} />
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <div>
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening due (0 if none)</div>
+                  <input className={numCls} type="number" placeholder="0" value={newLaborOpening} onChange={e => setNewLaborOpening(e.target.value)} />
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">As of date</div>
+                  <input className={selCls} type="date" value={newLaborOpeningDate} onChange={e => setNewLaborOpeningDate(e.target.value)} />
+                </div>
+              </div>
               <button onClick={addLabor} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold mt-2">+ Add Labor</button>
             </div>
             <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Upload opening due (Excel/CSV: col A = labor name, col B = amount due)</div>
-              <select className={selCls + " mb-2"} value={laborUploadBranch} onChange={e => setLaborUploadBranch(e.target.value)}>
-                <option value="">All branches</option>
-                {BRANCHES.map(b => <option key={b}>{b}</option>)}
-              </select>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <select className={selCls} value={laborUploadBranch} onChange={e => setLaborUploadBranch(e.target.value)}>
+                  <option value="">All branches</option>
+                  {BRANCHES.map(b => <option key={b}>{b}</option>)}
+                </select>
+                <input className={selCls} type="date" value={newLaborOpeningDate} onChange={e => setNewLaborOpeningDate(e.target.value)} />
+              </div>
               <FileUploadRow flash={flash} onRows={uploadLaborOpening} />
             </div>
             {(db.labors || []).map(l => (
@@ -2660,8 +2736,16 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                       {BRANCHES.map(b => <option key={b}>{b}</option>)}
                     </select>
                   </div>
-                  <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening due</div>
-                  <input className={numCls + " mb-2"} type="number" value={editLaborDraft.openingDue} onChange={e => setEditLaborDraft(d => ({ ...d, openingDue: e.target.value }))} />
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <div>
+                      <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Opening due</div>
+                      <input className={numCls} type="number" value={editLaborDraft.openingDue} onChange={e => setEditLaborDraft(d => ({ ...d, openingDue: e.target.value }))} />
+                    </div>
+                    <div>
+                      <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">As of date</div>
+                      <input className={selCls} type="date" value={editLaborDraft.openingDate} onChange={e => setEditLaborDraft(d => ({ ...d, openingDate: e.target.value }))} />
+                    </div>
+                  </div>
                   <div className="flex gap-2">
                     <button onClick={saveEditLabor} className="bg-[#2B6E63] text-white px-4 rounded-xl font-semibold">Save</button>
                     <button onClick={() => setEditLaborId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-4 rounded-xl font-semibold">Cancel</button>
@@ -2670,7 +2754,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               ) : (
                 <div key={l.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
                   <span className="text-sm">
-                    <b>{l.name}</b> <span className="text-[#8A9690]">· {money(l.dailyWage)}/day · {l.branch || "any branch"}{l.openingDue ? ` · opening ${money(l.openingDue)}` : ""}</span>
+                    <b>{l.name}</b> <span className="text-[#8A9690]">· {money(l.dailyWage)}/day · {l.branch || "any branch"}{l.openingDue ? ` · opening ${money(l.openingDue)} (${l.openingDate || "—"})` : ""}</span>
                     {(l.nic || l.phone) && <div className="text-[11px] text-[#8A9690] mt-0.5">{l.nic}{l.nic && l.phone ? " · " : ""}{l.phone}</div>}
                   </span>
                   <div className="flex items-center gap-3">
@@ -2707,6 +2791,9 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               <label className="flex items-center gap-2 mb-3 text-sm font-medium">
                 <input type="checkbox" checked={newUserNotifications} onChange={e => setNewUserNotifications(e.target.checked)} /> Push notifications enabled
               </label>
+              <label className="flex items-center gap-2 mb-3 text-sm font-medium">
+                <input type="checkbox" checked={newUserBackdate} onChange={e => setNewUserBackdate(e.target.checked)} /> Can pick a past date when adding entries
+              </label>
               <button onClick={addUser} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add User</button>
             </div>
             {db.users.map(u => (
@@ -2735,6 +2822,9 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
                 )}
                 <label className="flex items-center gap-2 mt-2.5 text-xs font-semibold text-[#5C6B62]">
                   <input type="checkbox" checked={u.notifications !== false} onChange={() => toggleUserNotifications(u.id)} /> Push notifications enabled
+                </label>
+                <label className="flex items-center gap-2 mt-1.5 text-xs font-semibold text-[#5C6B62]">
+                  <input type="checkbox" checked={!!u.canBackdate} onChange={() => toggleUserBackdate(u.id)} /> Can pick a past date when adding entries
                 </label>
               </div>
             ))}
