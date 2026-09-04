@@ -1474,7 +1474,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "POS Sales", "Activity Log"];
 
 function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf, onBack }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
@@ -2110,6 +2110,30 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             </ReportTable>
           );
         })()}
+        {tab === "POS Sales" && (() => {
+          const sales = (db.posSales || []).filter(s => myBranches.includes(s.branch) && (!dateFilter || s.date === dateFilter) && s.itemName.toLowerCase().includes(q.toLowerCase()));
+          const byItem = {};
+          sales.forEach(s => { byItem[s.itemName] = (byItem[s.itemName] || 0) + s.qty; });
+          return (
+            <ReportTable
+              title={dateFilter ? `POS Sales — ${dateFilter}` : "POS Sales — All Time"}
+              onExport={() => downloadCSV("pos-sales.csv", toCSV(sales, [
+                { label: "Date", get: s => s.date }, { label: "Branch", get: s => s.branch }, { label: "Item", get: s => s.itemName },
+                { label: "Qty", get: s => s.qty }, { label: "Source", get: s => s.source },
+              ]))}
+            >
+              <table className="w-full text-sm mb-3">
+                <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Qty Sold</th></tr></thead>
+                <tbody>
+                  {Object.entries(byItem).map(([name, qty]) => (
+                    <tr key={name} className="border-t border-[#EFEBDF]"><td className="py-2 font-medium">{name}</td><td className="text-right py-2 font-mono">{qty}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+              {sales.length === 0 && <div className="text-sm text-[#8A9690]">No POS sales{dateFilter ? " on this date" : ""} yet.</div>}
+            </ReportTable>
+          );
+        })()}
         {tab === "Activity Log" && (
           <ReportTable title={dateFilter ? `User Activity — ${dateFilter}` : "User Activity"} onExport={() => downloadCSV("activity-log.csv", toCSV(db.log.filter(l => !dateFilter || l.date === dateFilter), [{ label: "Time", get: l => l.at }, { label: "User", get: l => l.user }, { label: "Action", get: l => l.action }, { label: "Detail", get: l => l.detail }]))}>
             {db.log.filter(l => !dateFilter || l.date === dateFilter).slice(0, 200).map(l => (
@@ -2138,7 +2162,7 @@ function ReportTable({ title, onExport, children }) {
 
 /* ---------- Admin ---------- */
 
-function AdminScreen({ db, persist, addLog, flash, onBack }) {
+function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
   const [tab, setTab] = useState("Items");
   const [itemQ, setItemQ] = useState("");
   const [newItemName, setNewItemName] = useState("");
@@ -2336,6 +2360,43 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
   const [editLaborId, setEditLaborId] = useState(null);
   const [editLaborDraft, setEditLaborDraft] = useState({});
   const [laborUploadBranch, setLaborUploadBranch] = useState("");
+  const [posUploadBranch, setPosUploadBranch] = useState(BRANCHES[0]);
+  const [posUploadDate, setPosUploadDate] = useState(todayStr());
+  const [posSheetLink, setPosSheetLink] = useState(db.posSheetLink || "");
+  const savePosSheetLink = () => {
+    const next = { ...db, posSheetLink: posSheetLink.trim() };
+    addLog(next, "Admin", "Updated POS Google Sheet link");
+    persist(next); flash("Link saved");
+  };
+
+  const generatePosApiKey = () => {
+    const key = "sf_" + Array.from({ length: 32 }, () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]).join("");
+    const next = { ...db, posApiKey: key };
+    addLog(next, "Admin", "Generated new POS API key");
+    persist(next); flash("New API key generated");
+  };
+
+  const uploadPosSales = (rows) => {
+    const saleRecs = [];
+    const adjRecs = [];
+    let matchedRecipes = 0;
+    rows.forEach(row => {
+      saleRecs.push({ id: uid("pos"), date: posUploadDate, branch: posUploadBranch, itemName: row.name, qty: row.value, source: "upload" });
+      const recipe = (db.recipes || []).find(r => (!r.branch || r.branch === posUploadBranch) && r.produces.some(p => db.items.find(i => i.id === p.itemId)?.name.toLowerCase() === row.name.toLowerCase()));
+      if (recipe) {
+        matchedRecipes++;
+        const producedEntry = recipe.produces.find(p => db.items.find(i => i.id === p.itemId)?.name.toLowerCase() === row.name.toLowerCase());
+        const batches = row.value / (producedEntry.qty || 1);
+        recipe.consumes.forEach(c => {
+          adjRecs.push({ id: uid("adj"), date: posUploadDate, branch: posUploadBranch, itemId: c.itemId, qty: -Math.abs(c.qty * batches), kind: "pos-sale", reason: `POS sale: ${row.value} × ${row.name} (recipe: ${recipe.name})`, userId: session.id });
+        });
+      }
+    });
+    const next = { ...db, posSales: [...saleRecs, ...(db.posSales || [])], adjustments: [...adjRecs, ...(db.adjustments || [])] };
+    addLog(next, "Admin", `Uploaded POS sales for ${posUploadBranch} (${posUploadDate}): ${saleRecs.length} item(s), ${matchedRecipes} matched a recipe`);
+    persist(next);
+    flash(`Recorded ${saleRecs.length} sold item(s)${matchedRecipes ? `, deducted raw material for ${matchedRecipes}` : ""}`);
+  };
   const addLabor = () => {
     if (!newLaborName.trim() || !newLaborWage || Number(newLaborWage) <= 0) { flash("Name and daily wage required", "error"); return; }
     const rec = { id: uid("lab"), name: newLaborName.trim(), nic: newLaborNic.trim(), phone: newLaborPhone.trim(), dailyWage: Number(newLaborWage), branch: newLaborBranch || null, openingDue: Number(newLaborOpening) || 0, openingDate: newLaborOpeningDate, active: true };
@@ -2376,7 +2437,7 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
     <div>
       <TopBar title="Admin" onBack={onBack} />
       <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
-        {["Items", "Suppliers", "Rates", "Opening Stock", "Kitchens", "Recipes", "Labor", "Users", "Reset"].map(t => (
+        {["Items", "Suppliers", "Rates", "Opening Stock", "Kitchens", "Recipes", "Labor", "POS", "Users", "Reset"].map(t => (
           <button key={t} onClick={() => setTab(t)} className={`flex-1 whitespace-nowrap py-2.5 px-3 rounded-xl text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
         ))}
       </div>
@@ -2765,6 +2826,56 @@ function AdminScreen({ db, persist, addLog, flash, onBack }) {
               )
             ))}
             {(db.labors || []).length === 0 && <div className="text-sm text-[#8A9690]">No labor added yet.</div>}
+          </React.Fragment>
+        )}
+        {tab === "POS" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <div className="font-bold text-[#1F2A24] mb-2">POS Sales Sheet</div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Google Sheet link (end-of-day sales from POS)</div>
+              <input className={numCls + " font-sans mb-2"} placeholder="https://docs.google.com/spreadsheets/..." value={posSheetLink} onChange={e => setPosSheetLink(e.target.value)} />
+              <button onClick={savePosSheetLink} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold mb-2">Save Link</button>
+              {db.posSheetLink && (
+                <a href={db.posSheetLink} target="_blank" rel="noopener noreferrer" className="block text-center bg-[#2B6E63] text-white py-2.5 rounded-xl font-semibold">Open Sheet</a>
+              )}
+            </div>
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4 opacity-70">
+              <div className="font-bold text-[#1F2A24] mb-1">Automatic connection — not set up yet</div>
+              <div className="text-xs text-[#5C6B62]">The API endpoint and recipe-based auto-deduction below are already built and ready, for whenever you want to wire the full comparison (POS sold qty vs StockFlow's recipe-expected vs actual usage).</div>
+            </div>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <div className="font-bold text-[#1F2A24] mb-2">Live connection (for a POS to push sales automatically)</div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Endpoint</div>
+              <div className="bg-[#F7F5F0] rounded-lg p-2.5 text-xs font-mono break-all mb-3">{typeof window !== "undefined" ? window.location.origin : ""}/api/pos/sales</div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">API Key</div>
+              {db.posApiKey ? (
+                <div className="bg-[#F7F5F0] rounded-lg p-2.5 text-xs font-mono break-all mb-3">{db.posApiKey}</div>
+              ) : (
+                <div className="text-sm text-[#8A9690] mb-3">No key generated yet.</div>
+              )}
+              <button onClick={generatePosApiKey} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">{db.posApiKey ? "Regenerate" : "Generate"} API Key</button>
+              <div className="text-[11px] text-[#8A9690] mt-3">
+                POST JSON to the endpoint above: {"{ apiKey, branch, date (optional), items: [{ name, qty }] }"}.
+                If a sold item matches a Recipe (Admin → Recipes), its raw material is deducted automatically. Regenerating the key breaks the old one.
+              </div>
+            </div>
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+              <div className="font-bold text-[#1F2A24] mb-2">Manual upload (works today, no POS changes needed)</div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Excel/CSV: col A = item name, col B = qty sold</div>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <select className={selCls} value={posUploadBranch} onChange={e => setPosUploadBranch(e.target.value)}>{BRANCHES.map(b => <option key={b}>{b}</option>)}</select>
+                <input className={selCls} type="date" value={posUploadDate} onChange={e => setPosUploadDate(e.target.value)} />
+              </div>
+              <FileUploadRow flash={flash} onRows={uploadPosSales} />
+            </div>
+            <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Recent POS Sales</div>
+            {(db.posSales || []).slice(0, 30).map(s => (
+              <div key={s.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                <span className="text-sm">{s.itemName} <span className="text-[#8A9690]">· {s.branch} · {s.date} · {s.source}</span></span>
+                <span className="font-mono font-bold text-sm">{s.qty}</span>
+              </div>
+            ))}
+            {(db.posSales || []).length === 0 && <div className="text-sm text-[#8A9690]">No POS sales recorded yet.</div>}
           </React.Fragment>
         )}
         {tab === "Users" && (
