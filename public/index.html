@@ -273,9 +273,10 @@ function extractSheetId(url) {
 }
 
 // Fetches one tab of a shared ("anyone with the link") Google Sheet as parsed rows (array of objects, keyed by header row).
-async function fetchGoogleSheetTab(sheetId, tabName) {
-  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
-  const res = await fetch(url);
+async function fetchGoogleSheetTab(sheetId, tabName, force) {
+  const bust = force ? `&_=${Date.now()}` : "";
+  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}${bust}`;
+  const res = await fetch(url, force ? { cache: "no-store" } : {});
   if (!res.ok) throw new Error("Could not reach that sheet tab: " + tabName);
   const text = await res.text();
   const wb = XLSX.read(text, { type: "string" });
@@ -1590,34 +1591,50 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   const [lossReasonFor, setLossReasonFor] = useState(null);
   const [lossReasonText, setLossReasonText] = useState("");
 
-  const loadPosSales = async () => {
+  const loadPosSales = async (force) => {
     if (!posSheetId) { setPosError("No Google Sheet link saved yet — add one in Admin → POS."); return; }
     setPosLoading(true); setPosError(null);
-    try { setPosSalesRows(await fetchGoogleSheetTab(posSheetId, "Sales")); }
+    try { setPosSalesRows(await fetchGoogleSheetTab(posSheetId, "Sales", force)); }
     catch (e) { setPosError("Couldn't load the Sales tab — check the sheet is shared \"Anyone with the link\"."); }
     setPosLoading(false);
   };
-  const loadPosVoid = async () => {
+  const loadPosVoid = async (force) => {
     if (!posSheetId) { setPosError("No Google Sheet link saved yet — add one in Admin → POS."); return; }
     setPosLoading(true); setPosError(null);
-    try { setPosVoidRows(await fetchGoogleSheetTab(posSheetId, "Reduced-Voided")); }
+    try { setPosVoidRows(await fetchGoogleSheetTab(posSheetId, "Reduced-Voided", force)); }
     catch (e) { setPosError("Couldn't load the Reduced-Voided tab — check the sheet is shared \"Anyone with the link\"."); }
     setPosLoading(false);
+  };
+  const refreshPosData = () => {
+    if (tab === "POS Void/Less") loadPosVoid(true);
+    else loadPosSales(true);
   };
   useEffect(() => {
     if ((tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock") && !posSalesRows && !posLoading) loadPosSales();
     if (tab === "POS Void/Less" && !posVoidRows && !posLoading) loadPosVoid();
   }, [tab]);
 
+  // A row only counts if it has a real, parseable date — old legacy rows with a blank Date
+  // used to silently fall back to 1 Jan 1970; now they're excluded and counted separately instead.
+  const validBusinessDate = (raw) => {
+    if (!raw) return null;
+    const d = new Date(raw);
+    if (isNaN(d.getTime()) || d.getFullYear() < 2000) return null;
+    return businessDateOf(d);
+  };
+  const posSalesUndated = (posSalesRows || []).filter(r => !validBusinessDate(r.Date)).length;
   const posSalesFiltered = (posSalesRows || []).filter(r => {
-    const bd = businessDateOf(r.Date);
+    const bd = validBusinessDate(r.Date);
+    if (!bd) return false;
     if (dateFilter && bd !== dateFilter) return false;
     const sfBranch = mapPosBranch(r.Branch);
     if (!myBranches.includes(sfBranch) && r.Branch !== "ALL") return false;
     return true;
   });
+  const posVoidUndated = (posVoidRows || []).filter(r => !validBusinessDate(r.Date)).length;
   const posVoidFiltered = (posVoidRows || []).filter(r => {
-    const bd = businessDateOf(r.Date);
+    const bd = validBusinessDate(r.Date);
+    if (!bd) return false;
     if (dateFilter && bd !== dateFilter) return false;
     const sfBranch = mapPosBranch(r.Branch);
     if (!myBranches.includes(sfBranch) && r.Branch !== "ALL") return false;
@@ -2237,6 +2254,13 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
         })()}
         {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && !posSheetId && (
           <div className="bg-white rounded-xl p-4 border border-[#EAE4D4] text-sm text-[#8A9690]">No Google Sheet link saved yet — add one in Admin → POS.</div>
+        )}
+        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSheetId && (
+          <div className="flex justify-between items-center mb-3">
+            <button onClick={refreshPosData} disabled={posLoading} className="text-xs font-semibold text-[#4A6FA5] bg-[#4A6FA5]/10 px-3 py-1.5 rounded-full disabled:opacity-50">{posLoading ? "Refreshing…" : "↻ Refresh from Sheet"}</button>
+            {(tab === "POS Sale" || tab === "POS Item Sale") && posSalesUndated > 0 && <div className="text-[11px] text-[#B3562C]">{posSalesUndated} row(s) skipped — no valid date</div>}
+            {tab === "POS Void/Less" && posVoidUndated > 0 && <div className="text-[11px] text-[#B3562C]">{posVoidUndated} row(s) skipped — no valid date</div>}
+          </div>
         )}
         {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSheetId && posLoading && (
           <div className="bg-white rounded-xl p-4 border border-[#EAE4D4] text-sm text-[#8A9690]">Loading from the sheet…</div>
