@@ -1614,26 +1614,33 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
     if (tab === "POS Void/Less" && !posVoidRows && !posLoading) loadPosVoid();
   }, [tab]);
 
-  // A row only counts if it has a real, parseable date — old legacy rows with a blank Date
-  // used to silently fall back to 1 Jan 1970; now they're excluded and counted separately instead.
-  const validBusinessDate = (raw) => {
-    if (!raw) return null;
-    const d = new Date(raw);
-    if (isNaN(d.getTime()) || d.getFullYear() < 2000) return null;
-    return businessDateOf(d);
+  // A row only counts if it has a real, parseable date. The sheet's format changed partway through:
+  // older rows had one combined ISO datetime in "Date"; newer rows (19 Aug onward) split it into
+  // separate "Date" and "Time" fields. Both are tried; rows matching neither (pre-19 Aug misaligned
+  // data) are excluded rather than silently defaulting to 1 Jan 1970.
+  const validBusinessDate = (row) => {
+    const dateRaw = row && row.Date, timeRaw = row && row.Time;
+    if (!dateRaw) return null;
+    let d = new Date(dateRaw);
+    if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) return businessDateOf(d);
+    if (timeRaw) {
+      d = new Date(`${dateRaw}T${timeRaw}`);
+      if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) return businessDateOf(d);
+    }
+    return null;
   };
-  const posSalesUndated = (posSalesRows || []).filter(r => !validBusinessDate(r.Date)).length;
+  const posSalesUndated = (posSalesRows || []).filter(r => !validBusinessDate(r)).length;
   const posSalesFiltered = (posSalesRows || []).filter(r => {
-    const bd = validBusinessDate(r.Date);
+    const bd = validBusinessDate(r);
     if (!bd) return false;
     if (dateFilter && bd !== dateFilter) return false;
     const sfBranch = mapPosBranch(r.Branch);
     if (!myBranches.includes(sfBranch) && r.Branch !== "ALL") return false;
     return true;
   });
-  const posVoidUndated = (posVoidRows || []).filter(r => !validBusinessDate(r.Date)).length;
+  const posVoidUndated = (posVoidRows || []).filter(r => !validBusinessDate(r)).length;
   const posVoidFiltered = (posVoidRows || []).filter(r => {
-    const bd = validBusinessDate(r.Date);
+    const bd = validBusinessDate(r);
     if (!bd) return false;
     if (dateFilter && bd !== dateFilter) return false;
     const sfBranch = mapPosBranch(r.Branch);
@@ -2240,14 +2247,20 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
         )}
         {(tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSalesRows && posSalesRows.length > 0 && (
           <details className="mb-3 bg-[#F7F5F0] rounded-lg p-2.5 text-[10px] text-[#5C6B62]">
-            <summary className="font-semibold cursor-pointer">Debug: first row as received ({posSalesRows.length} total rows)</summary>
-            <pre className="whitespace-pre-wrap break-all mt-1.5">{JSON.stringify(posSalesRows[0], null, 1)}</pre>
+            <summary className="font-semibold cursor-pointer">Debug ({posSalesRows.length} total rows, {posSalesFiltered.length} valid+in range)</summary>
+            <div className="font-semibold mt-1">Last 3 rows in the sheet (should be your newest data):</div>
+            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posSalesRows.slice(-3).map(r => ({ Date: r.Date, Time: r.Time, Branch: r.Branch })), null, 1)}</pre>
+            <div className="font-semibold mt-2">Date/Time from 5 rows that failed the check:</div>
+            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posSalesRows.filter(r => !validBusinessDate(r)).slice(0, 5).map(r => ({ Date: r.Date, Time: r.Time })), null, 1)}</pre>
           </details>
         )}
         {tab === "POS Void/Less" && posVoidRows && posVoidRows.length > 0 && (
           <details className="mb-3 bg-[#F7F5F0] rounded-lg p-2.5 text-[10px] text-[#5C6B62]">
-            <summary className="font-semibold cursor-pointer">Debug: first row as received ({posVoidRows.length} total rows)</summary>
-            <pre className="whitespace-pre-wrap break-all mt-1.5">{JSON.stringify(posVoidRows[0], null, 1)}</pre>
+            <summary className="font-semibold cursor-pointer">Debug ({posVoidRows.length} total rows, {posVoidFiltered.length} valid+in range)</summary>
+            <div className="font-semibold mt-1">Last 3 rows in the sheet (should be your newest data):</div>
+            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posVoidRows.slice(-3).map(r => ({ Date: r.Date, Time: r.Time, Branch: r.Branch })), null, 1)}</pre>
+            <div className="font-semibold mt-2">Date/Time from 5 rows that failed the check:</div>
+            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posVoidRows.filter(r => !validBusinessDate(r)).slice(0, 5).map(r => ({ Date: r.Date, Time: r.Time })), null, 1)}</pre>
           </details>
         )}
         {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSheetId && posLoading && (
