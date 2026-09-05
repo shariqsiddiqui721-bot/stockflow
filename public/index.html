@@ -1529,7 +1529,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Owner Ledger", "Activity Log"];
 const POS_BRANCH_MAP = { "Federal B Area": "FB", "North Nazimabad": "North" };
 const mapPosBranch = (b) => POS_BRANCH_MAP[b] || b;
 
@@ -1611,6 +1611,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   const [posError, setPosError] = useState(null);
   const [expandedVoidItem, setExpandedVoidItem] = useState(null);
   const [lossReasonFor, setLossReasonFor] = useState(null);
+  const [editOwnerFor, setEditOwnerFor] = useState(null);
   const [lossReasonText, setLossReasonText] = useState("");
 
   const loadPosSales = async (force) => {
@@ -1632,7 +1633,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
     else loadPosSales(true);
   };
   useEffect(() => {
-    if ((tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock") && !posSalesRows && !posLoading) loadPosSales();
+    if ((tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock" || tab === "Owner Ledger") && !posSalesRows && !posLoading) loadPosSales();
     if (tab === "POS Void/Less" && !posVoidRows && !posLoading) loadPosVoid();
   }, [tab]);
 
@@ -1676,6 +1677,25 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
     });
     return totals;
   }, [posSalesFiltered.length, dateFilter]);
+
+  // Maps a raw POS "Payment Method" value to one of our 4 owner-ledger modes.
+  const paymentModeOf = (raw) => {
+    const s = String(raw || "").toLowerCase();
+    if (s.includes("cash")) return "cash";
+    if (s.includes("easypaisa")) return "easypaisa";
+    if (s.includes("jazzcash") || s.includes("jazz cash")) return "jazzcash";
+    if (s.includes("card") || s.includes("bank")) return "bank";
+    return "other";
+  };
+  const ownerFor = (invoiceNo, mode) => {
+    const override = (db.ownerOverrides || {})[invoiceNo];
+    if (override !== undefined) return override || null;
+    return (db.ownerModeDefaults || {})[mode] || null;
+  };
+  const setOwnerOverride = (invoiceNo, ownerId) => {
+    const next = { ...db, ownerOverrides: { ...(db.ownerOverrides || {}), [invoiceNo]: ownerId || null } };
+    persist(next);
+  };
 
   const saveLossReason = (key, branch, itemId) => {
     if (!lossReasonText.trim()) { flash("Enter a reason", "error"); return; }
@@ -2257,23 +2277,27 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             </ReportTable>
           );
         })()}
-        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && !posSheetId && (
+        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock" || tab === "Owner Ledger") && !posSheetId && (
           <div className="bg-white rounded-xl p-4 border border-[#EAE4D4] text-sm text-[#8A9690]">No Google Sheet link saved yet — add one in Admin → POS.</div>
         )}
-        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSheetId && (
+        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock" || tab === "Owner Ledger") && posSheetId && (
           <div className="flex justify-between items-center mb-3">
             <button onClick={refreshPosData} disabled={posLoading} className="text-xs font-semibold text-[#4A6FA5] bg-[#4A6FA5]/10 px-3 py-1.5 rounded-full disabled:opacity-50">{posLoading ? "Refreshing…" : "↻ Refresh from Sheet"}</button>
             {(tab === "POS Sale" || tab === "POS Item Sale") && posSalesUndated > 0 && <div className="text-[11px] text-[#B3562C]">{posSalesUndated} row(s) skipped — no valid date</div>}
             {tab === "POS Void/Less" && posVoidUndated > 0 && <div className="text-[11px] text-[#B3562C]">{posVoidUndated} row(s) skipped — no valid date</div>}
           </div>
         )}
-        {(tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSalesRows && posSalesRows.length > 0 && (
+        {(tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock" || tab === "Owner Ledger") && posSalesRows && posSalesRows.length > 0 && (
           <details className="mb-3 bg-[#F7F5F0] rounded-lg p-2.5 text-[10px] text-[#5C6B62]">
             <summary className="font-semibold cursor-pointer">Debug ({posSalesRows.length} total rows, {posSalesFiltered.length} valid+in range)</summary>
-            <div className="font-semibold mt-1">Last 3 rows in the sheet (should be your newest data):</div>
-            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posSalesRows.slice(-3).map(r => ({ Date: r.Date, Time: r.Time, Branch: r.Branch })), null, 1)}</pre>
+            <div className="font-semibold mt-1">Counts per branch (raw sheet text, valid ones only):</div>
+            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posSalesFiltered.reduce((acc, r) => { acc[r.Branch] = (acc[r.Branch] || 0) + 1; return acc; }, {}), null, 1)}</pre>
+            <div className="font-semibold mt-2">All distinct raw Branch text values in the whole sheet:</div>
+            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify([...new Set(posSalesRows.map(r => r.Branch))], null, 1)}</pre>
+            <div className="font-semibold mt-2">Last row per branch (raw Date/Time as received):</div>
+            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify([...new Set(posSalesRows.map(r => r.Branch))].map(b => { const last = [...posSalesRows].reverse().find(r => r.Branch === b); return { Branch: b, Date: last?.Date, Time: last?.Time, validatesAs: validBusinessDate(last) }; }), null, 1)}</pre>
             <div className="font-semibold mt-2">Date/Time from 5 rows that failed the check:</div>
-            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posSalesRows.filter(r => !validBusinessDate(r)).slice(0, 5).map(r => ({ Date: r.Date, Time: r.Time })), null, 1)}</pre>
+            <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posSalesRows.filter(r => !validBusinessDate(r)).slice(0, 5).map(r => ({ Date: r.Date, Time: r.Time, Branch: r.Branch })), null, 1)}</pre>
           </details>
         )}
         {tab === "POS Void/Less" && posVoidRows && posVoidRows.length > 0 && (
@@ -2285,10 +2309,10 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             <pre className="whitespace-pre-wrap break-all mt-1">{JSON.stringify(posVoidRows.filter(r => !validBusinessDate(r)).slice(0, 5).map(r => ({ Date: r.Date, Time: r.Time })), null, 1)}</pre>
           </details>
         )}
-        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSheetId && posLoading && (
+        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock" || tab === "Owner Ledger") && posSheetId && posLoading && (
           <div className="bg-white rounded-xl p-4 border border-[#EAE4D4] text-sm text-[#8A9690]">Loading from the sheet…</div>
         )}
-        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock") && posSheetId && posError && (
+        {(tab === "POS Sale" || tab === "POS Void/Less" || tab === "POS Item Sale" || tab === "POS vs Stock" || tab === "Owner Ledger") && posSheetId && posError && (
           <div className="bg-[#FBEAEA] rounded-xl p-4 border-2 border-[#B33A3A] text-sm text-[#B33A3A] mb-3">{posError}</div>
         )}
         {tab === "POS Sale" && posSheetId && !posLoading && posSalesRows && (() => {
@@ -2491,6 +2515,66 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                   ))}
                 </div>
               ))}
+            </ReportTable>
+          );
+        })()}
+        {tab === "Owner Ledger" && posSheetId && !posLoading && posSalesRows && (() => {
+          const ownerName = (id) => (db.owners || []).find(o => o.id === id)?.name;
+          const groups = {}; // ownerId|"cash"|"other" -> { total, txns: [] }
+          posSalesFiltered.forEach(r => {
+            const mode = paymentModeOf(r["Payment Method"]);
+            const amount = Number(r["Grand Total"]) || 0;
+            if (mode === "cash") {
+              const g = groups.cash || (groups.cash = { label: "Branch (Cash)", total: 0, txns: [] });
+              g.total += amount; g.txns.push(r);
+              return;
+            }
+            const ownerId = ownerFor(r["Invoice No"], mode);
+            const key = ownerId || "unassigned";
+            const g = groups[key] || (groups[key] = { label: ownerId ? ownerName(ownerId) : "Unassigned", total: 0, txns: [] });
+            g.total += amount; g.txns.push(r);
+          });
+          const groupList = Object.entries(groups).sort((a, b) => b[1].total - a[1].total);
+          const grandTotal = groupList.reduce((a, [, g]) => a + g.total, 0);
+          return (
+            <ReportTable
+              title={dateFilter ? `Owner Ledger — ${dateFilter}` : "Owner Ledger — All Loaded Dates"}
+              onExport={() => downloadCSV("owner-ledger.csv", toCSV(
+                groupList.flatMap(([, g]) => g.txns.map(r => ({ owner: g.label, invoice: r["Invoice No"], branch: mapPosBranch(r.Branch), mode: r["Payment Method"], amount: r["Grand Total"], date: r.Date }))),
+                [{ label: "Owner/Bucket", get: r => r.owner }, { label: "Invoice", get: r => r.invoice }, { label: "Branch", get: r => r.branch }, { label: "Mode", get: r => r.mode }, { label: "Amount", get: r => r.amount }, { label: "Date", get: r => r.date }]
+              ))}
+            >
+              <div className="text-sm font-semibold mb-3">Total collected: <span className="font-mono">{money(grandTotal)}</span></div>
+              {groupList.map(([key, g]) => (
+                <div key={key} className="mb-4">
+                  <div className="flex justify-between items-center mb-1.5">
+                    <span className="text-sm font-bold text-[#1F2A24]">{g.label}</span>
+                    <span className="font-mono font-bold text-sm">{money(g.total)}</span>
+                  </div>
+                  {g.txns.slice(0, 50).map((r, idx) => (
+                    <div key={idx} className="flex justify-between items-center py-1.5 border-t border-[#EFEBDF] first:border-t-0 text-[11px]">
+                      <div className="text-[#5C6B62]">
+                        {r["Invoice No"]} · {mapPosBranch(r.Branch)} · {String(r["Payment Method"]).toLowerCase()}
+                        {key !== "cash" && (
+                          editOwnerFor === r["Invoice No"] ? (
+                            <select autoFocus className="ml-2 text-[11px] border rounded px-1 py-0.5" defaultValue={key === "unassigned" ? "" : key}
+                              onChange={e => { setOwnerOverride(r["Invoice No"], e.target.value); setEditOwnerFor(null); }}
+                              onBlur={() => setEditOwnerFor(null)}>
+                              <option value="">— unassigned —</option>
+                              {(db.owners || []).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                            </select>
+                          ) : (
+                            <button onClick={() => setEditOwnerFor(r["Invoice No"])} className="ml-2 text-[#4A6FA5] font-semibold">change</button>
+                          )
+                        )}
+                      </div>
+                      <div className="font-mono">{money(r["Grand Total"])}</div>
+                    </div>
+                  ))}
+                  {g.txns.length > 50 && <div className="text-[10px] text-[#8A9690] mt-1">+ {g.txns.length - 50} more</div>}
+                </div>
+              ))}
+              {groupList.length === 0 && <div className="text-sm text-[#8A9690]">No collections in range.</div>}
             </ReportTable>
           );
         })()}
@@ -2729,6 +2813,24 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
     persist(next); flash("Link saved");
   };
 
+  const [newOwnerName, setNewOwnerName] = useState("");
+  const addOwner = () => {
+    if (!newOwnerName.trim()) return;
+    const rec = { id: uid("own"), name: newOwnerName.trim() };
+    const next = { ...db, owners: [...(db.owners || []), rec] };
+    addLog(next, "Admin", `Added owner ${rec.name}`);
+    persist(next); setNewOwnerName(""); flash("Owner added");
+  };
+  const delOwner = (id) => {
+    const next = { ...db, owners: (db.owners || []).filter(o => o.id !== id) };
+    persist(next);
+  };
+  const setOwnerModeDefault = (mode, ownerId) => {
+    const next = { ...db, ownerModeDefaults: { ...(db.ownerModeDefaults || {}), [mode]: ownerId || null } };
+    addLog(next, "Admin", `Set default owner for ${mode} to ${db.owners.find(o => o.id === ownerId)?.name || "Branch (none)"}`);
+    persist(next); flash("Default updated");
+  };
+
   const generatePosApiKey = () => {
     const key = "sf_" + Array.from({ length: 32 }, () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]).join("");
     const next = { ...db, posApiKey: key };
@@ -2797,7 +2899,7 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
     <div>
       <TopBar title="Admin" onBack={onBack} />
       <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
-        {["Items", "Suppliers", "Rates", "Opening Stock", "Kitchens", "Recipes", "Labor", "POS", "Users", "Reset"].map(t => (
+        {["Items", "Suppliers", "Rates", "Opening Stock", "Kitchens", "Recipes", "Labor", "POS", "Owners", "Users", "Reset"].map(t => (
           <button key={t} onClick={() => setTab(t)} className={`flex-1 whitespace-nowrap py-2.5 px-3 rounded-xl text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
         ))}
       </div>
@@ -3236,6 +3338,33 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
               </div>
             ))}
             {(db.posSales || []).length === 0 && <div className="text-sm text-[#8A9690]">No POS sales recorded yet.</div>}
+          </React.Fragment>
+        )}
+        {tab === "Owners" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <input className={numCls + " font-sans mb-2"} placeholder="Owner name" value={newOwnerName} onChange={e => setNewOwnerName(e.target.value)} />
+              <button onClick={addOwner} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Owner</button>
+            </div>
+            {(db.owners || []).map(o => (
+              <div key={o.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
+                <span className="text-sm font-semibold">{o.name}</span>
+                <button onClick={() => delOwner(o.id)} className="text-[#B33A3A]">✕</button>
+              </div>
+            ))}
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mt-4">
+              <div className="font-bold text-[#1F2A24] mb-2">Default owner per payment mode</div>
+              <div className="text-[11px] text-[#8A9690] mb-3">Cash stays with the branch (used to pay suppliers/partners locally) — no owner assigned. Every other mode routes straight to an owner by default; this can still be changed per-transaction in Reports → Owner Ledger.</div>
+              {["easypaisa", "jazzcash", "bank"].map(mode => (
+                <div key={mode} className="mb-2">
+                  <div className="text-xs font-semibold text-[#5C6B62] mb-1 capitalize">{mode}</div>
+                  <select className={selCls} value={db.ownerModeDefaults?.[mode] || ""} onChange={e => setOwnerModeDefault(mode, e.target.value)}>
+                    <option value="">— none —</option>
+                    {(db.owners || []).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
           </React.Fragment>
         )}
         {tab === "Users" && (
