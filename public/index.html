@@ -1332,27 +1332,46 @@ function OwnerTransactionScreen({ db, session, persist, addLog, flash, onDone })
   const [ownerId, setOwnerId] = useState((db.owners || [])[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [branch, setBranch] = useState(myBranches[0]);
-  const [paidTo, setPaidTo] = useState("");
   const [note, setNote] = useState("");
+
+  // Owner Payment (out) side only:
+  const [payCategory, setPayCategory] = useState("supplier"); // supplier | branch | owner | personal
+  const [paySupplierId, setPaySupplierId] = useState("__other__");
+  const [paySupplierOther, setPaySupplierOther] = useState("");
+  const [payBranchChoice, setPayBranchChoice] = useState(BRANCHES[0]);
+  const [payBranchOther, setPayBranchOther] = useState("");
+  const [payOwnerChoice, setPayOwnerChoice] = useState("__other__");
+  const [payOwnerOther, setPayOwnerOther] = useState("");
+  const [payMode, setPayMode] = useState("cash"); // cash | jazzcash | easypaisa | bank
+
+  const resolvedPaidTo = () => {
+    if (payCategory === "personal") return "Personal Use";
+    if (payCategory === "supplier") return paySupplierId === "__other__" ? paySupplierOther.trim() : db.suppliers.find(s => s.id === paySupplierId)?.name;
+    if (payCategory === "branch") return payBranchChoice === "__other__" ? payBranchOther.trim() : payBranchChoice;
+    if (payCategory === "owner") return payOwnerChoice === "__other__" ? payOwnerOther.trim() : (db.owners || []).find(o => o.id === payOwnerChoice)?.name;
+    return "";
+  };
 
   const save = () => {
     const amt = Number(amount);
     if (!ownerId) { flash("Select an owner", "error"); return; }
     if (!amt || amt <= 0) { flash("Enter a valid amount", "error"); return; }
-    if (direction === "out" && !paidTo.trim()) { flash("Enter who the owner paid", "error"); return; }
+    const paidTo = direction === "out" ? resolvedPaidTo() : null;
+    if (direction === "out" && !paidTo) { flash("Select or write who the owner paid", "error"); return; }
     const rec = {
       id: uid("otx"), date: entryDate, ownerId, direction, amount: amt,
       branch: direction === "in" ? branch : null,
-      paidTo: direction === "out" ? paidTo.trim() : null,
+      paidTo, paidCategory: direction === "out" ? payCategory : null,
+      payMode: direction === "out" ? payMode : null,
       note: note.trim(), userId: session.id,
     };
     const next = { ...db, ownerTransactions: [rec, ...(db.ownerTransactions || [])] };
     const ownerName = (db.owners || []).find(o => o.id === ownerId)?.name;
     addLog(next, "Owner Transaction", direction === "in"
       ? `${money(amt)} cash from ${branch} to ${ownerName}`
-      : `${ownerName} paid ${money(amt)} to ${paidTo.trim()}`);
+      : `${ownerName} paid ${money(amt)} to ${paidTo} via ${payMode}`);
     persist(next);
-    flash("Saved"); setAmount(""); setPaidTo(""); setNote("");
+    flash("Saved"); setAmount(""); setNote(""); setPaySupplierOther(""); setPayBranchOther(""); setPayOwnerOther("");
   };
 
   return (
@@ -1383,9 +1402,56 @@ function OwnerTransactionScreen({ db, session, persist, addLog, flash, onDone })
             <select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select>
           </Field>
         ) : (
-          <Field label="Paid To (supplier / branch / partner)">
-            <input className={numCls + " font-sans"} value={paidTo} onChange={e => setPaidTo(e.target.value)} placeholder="e.g. Islam (Dumba supplier)" />
-          </Field>
+          <React.Fragment>
+            <Field label="Paid To">
+              <select className={selCls} value={payCategory} onChange={e => setPayCategory(e.target.value)}>
+                <option value="supplier">Supplier</option>
+                <option value="branch">Branch</option>
+                <option value="owner">Other Owner</option>
+                <option value="personal">Personal Use</option>
+              </select>
+            </Field>
+            {payCategory === "supplier" && (
+              <Field label="Which supplier">
+                <select className={selCls} value={paySupplierId} onChange={e => setPaySupplierId(e.target.value)}>
+                  {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  <option value="__other__">Other (write in)</option>
+                </select>
+                {paySupplierId === "__other__" && (
+                  <input className={numCls + " font-sans mt-2"} value={paySupplierOther} onChange={e => setPaySupplierOther(e.target.value)} placeholder="Supplier name" />
+                )}
+              </Field>
+            )}
+            {payCategory === "branch" && (
+              <Field label="Which branch">
+                <select className={selCls} value={payBranchChoice} onChange={e => setPayBranchChoice(e.target.value)}>
+                  {BRANCHES.map(b => <option key={b} value={b}>{b}</option>)}
+                  <option value="__other__">Other (write in)</option>
+                </select>
+                {payBranchChoice === "__other__" && (
+                  <input className={numCls + " font-sans mt-2"} value={payBranchOther} onChange={e => setPayBranchOther(e.target.value)} placeholder="Branch / location name" />
+                )}
+              </Field>
+            )}
+            {payCategory === "owner" && (
+              <Field label="Which owner">
+                <select className={selCls} value={payOwnerChoice} onChange={e => setPayOwnerChoice(e.target.value)}>
+                  {(db.owners || []).filter(o => o.id !== ownerId).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  <option value="__other__">Other (write in)</option>
+                </select>
+                {payOwnerChoice === "__other__" && (
+                  <input className={numCls + " font-sans mt-2"} value={payOwnerOther} onChange={e => setPayOwnerOther(e.target.value)} placeholder="Name" />
+                )}
+              </Field>
+            )}
+            <Field label="Paid Via">
+              <div className="grid grid-cols-4 gap-1.5">
+                {["cash", "jazzcash", "easypaisa", "bank"].map(m => (
+                  <button key={m} onClick={() => setPayMode(m)} className={`py-2 rounded-lg text-[11px] font-semibold capitalize border-2 ${payMode === m ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>{m}</button>
+                ))}
+              </div>
+            </Field>
+          </React.Fragment>
         )}
         <Field label="Note (optional)">
           <input className={numCls + " font-sans"} value={note} onChange={e => setNote(e.target.value)} placeholder="Any extra detail" />
@@ -2628,7 +2694,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
               g.txns.push({ kind: "manual-in", date: t.date, label: `Cash from ${t.branch}${t.note ? " — " + t.note : ""}`, amount: t.amount });
             } else {
               g.total -= t.amount; g.out += t.amount;
-              g.txns.push({ kind: "manual-out", date: t.date, label: `Paid to ${t.paidTo}${t.note ? " — " + t.note : ""}`, amount: -t.amount });
+              g.txns.push({ kind: "manual-out", date: t.date, label: `Paid to ${t.paidTo} (${t.payMode || "cash"})${t.note ? " — " + t.note : ""}`, amount: -t.amount });
             }
           });
 
