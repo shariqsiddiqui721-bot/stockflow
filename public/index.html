@@ -1327,9 +1327,11 @@ function CustomerReviewScreen({ db, session, persist, addLog, flash, onDone }) {
 function OwnerTransactionScreen({ db, session, persist, addLog, flash, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const canBackdate = session.canBackdate || (session.permissions || []).includes("admin");
+  const myOwners = (session.ownerIds && session.ownerIds.length) ? (db.owners || []).filter(o => session.ownerIds.includes(o.id)) : (db.owners || []);
+  const canRecordIn = session.canRecordOwnerIn !== false;
   const [entryDate, setEntryDate] = useState(todayStr());
-  const [direction, setDirection] = useState("in"); // in = cash handed to owner, out = owner payment
-  const [ownerId, setOwnerId] = useState((db.owners || [])[0]?.id || "");
+  const [direction, setDirection] = useState(canRecordIn ? "in" : "out"); // in = cash handed to owner, out = owner payment
+  const [ownerId, setOwnerId] = useState(myOwners[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [branch, setBranch] = useState(myBranches[0]);
   const [note, setNote] = useState("");
@@ -1394,15 +1396,17 @@ function OwnerTransactionScreen({ db, session, persist, addLog, flash, onDone })
             <input type="date" className={selCls} value={entryDate} onChange={e => setEntryDate(e.target.value)} max={todayStr()} />
           </Field>
         )}
-        <Field label="Type">
-          <div className="grid grid-cols-2 gap-2">
-            <button onClick={() => setDirection("in")} className={`py-2.5 rounded-lg text-sm font-semibold border-2 ${direction === "in" ? "bg-[#2B6E63] text-white border-[#2B6E63]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>Cash to Owner</button>
-            <button onClick={() => setDirection("out")} className={`py-2.5 rounded-lg text-sm font-semibold border-2 ${direction === "out" ? "bg-[#B33A3A] text-white border-[#B33A3A]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>Owner Payment</button>
-          </div>
-        </Field>
+        {canRecordIn && (
+          <Field label="Type">
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={() => setDirection("in")} className={`py-2.5 rounded-lg text-sm font-semibold border-2 ${direction === "in" ? "bg-[#2B6E63] text-white border-[#2B6E63]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>Cash to Owner</button>
+              <button onClick={() => setDirection("out")} className={`py-2.5 rounded-lg text-sm font-semibold border-2 ${direction === "out" ? "bg-[#B33A3A] text-white border-[#B33A3A]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>Owner Payment</button>
+            </div>
+          </Field>
+        )}
         <Field label="Owner">
           <select className={selCls} value={ownerId} onChange={e => setOwnerId(e.target.value)}>
-            {(db.owners || []).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+            {myOwners.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
           </select>
         </Field>
         <Field label="Amount">
@@ -2724,7 +2728,10 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             }
           });
 
-          const groupList = Object.entries(groups).sort((a, b) => b[1].total - a[1].total);
+          const myOwnerIds = (session.ownerIds && session.ownerIds.length) ? session.ownerIds : null;
+          const groupList = Object.entries(groups)
+            .filter(([key]) => !myOwnerIds || key === "cash" || key === "unassigned" || myOwnerIds.includes(key))
+            .sort((a, b) => b[1].total - a[1].total);
           const grandNet = groupList.reduce((a, [, g]) => a + g.total, 0);
           const changeInMode = (recId, newMode) => {
             const next = { ...db, ownerTransactions: (db.ownerTransactions || []).map(t => t.id === recId ? { ...t, payMode: newMode } : t) };
@@ -2866,6 +2873,8 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
   const [newUserItemIds, setNewUserItemIds] = useState([]);
   const [newUserNotifications, setNewUserNotifications] = useState(true);
   const [newUserBackdate, setNewUserBackdate] = useState(false);
+  const [newUserOwnerIds, setNewUserOwnerIds] = useState([]);
+  const [newUserOwnerCanIn, setNewUserOwnerCanIn] = useState(true);
   const [newKitchenName, setNewKitchenName] = useState("");
   const [newKitchenBranch, setNewKitchenBranch] = useState(BRANCHES.find(b => b !== "Store") || BRANCHES[0]);
   const [newKitchenItems, setNewKitchenItems] = useState([]);
@@ -2911,7 +2920,7 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
     persist(next); setEditSupplierId(null); flash("Supplier updated");
   };
 
-  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens, itemIds: newUserItemIds, notifications: newUserNotifications, canBackdate: newUserBackdate }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); setNewUserItemIds([]); setNewUserNotifications(true); setNewUserBackdate(false); flash("User added"); };
+  const addUser = () => { if (!newUserName.trim() || newUserPin.length < 4) { flash("Name + 4-6 digit PIN required", "error"); return; } const rec = { id: uid("u"), name: newUserName.trim(), pin: newUserPin, permissions: newUserPerms, branches: newUserBranches, reportTabs: newUserReportTabs, kitchens: newUserKitchens, itemIds: newUserItemIds, notifications: newUserNotifications, canBackdate: newUserBackdate, ownerIds: newUserOwnerIds, canRecordOwnerIn: newUserOwnerCanIn }; const next = { ...db, users: [...db.users, rec] }; addLog(next, "Admin", `Added user ${rec.name}`); persist(next); setNewUserName(""); setNewUserPin(""); setNewUserPerms(["purchase"]); setNewUserBranches([...BRANCHES]); setNewUserReportTabs([...REPORT_TABS]); setNewUserKitchens([]); setNewUserItemIds([]); setNewUserNotifications(true); setNewUserBackdate(false); setNewUserOwnerIds([]); setNewUserOwnerCanIn(true); flash("User added"); };
   const delUser = (id) => persist({ ...db, users: db.users.filter(u => u.id !== id) });
   const toggleUserPerm = (userId, perm) => {
     const next = { ...db, users: db.users.map(u => {
@@ -2952,6 +2961,18 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
   };
   const toggleUserBackdate = (userId) => {
     const next = { ...db, users: db.users.map(u => u.id === userId ? { ...u, canBackdate: !u.canBackdate } : u) };
+    persist(next);
+  };
+  const toggleUserOwnerId = (userId, ownerId) => {
+    const next = { ...db, users: db.users.map(u => {
+      if (u.id !== userId) return u;
+      const has = (u.ownerIds || []).includes(ownerId);
+      return { ...u, ownerIds: has ? u.ownerIds.filter(x => x !== ownerId) : [...(u.ownerIds || []), ownerId] };
+    }) };
+    persist(next);
+  };
+  const toggleUserOwnerCanIn = (userId) => {
+    const next = { ...db, users: db.users.map(u => u.id === userId ? { ...u, canRecordOwnerIn: u.canRecordOwnerIn === false } : u) };
     persist(next);
   };
 
@@ -3634,6 +3655,16 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
               <label className="flex items-center gap-2 mb-3 text-sm font-medium">
                 <input type="checkbox" checked={newUserBackdate} onChange={e => setNewUserBackdate(e.target.checked)} /> Can pick a past date when adding entries
               </label>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Owners visible (blank = all)</div>
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {(db.owners || []).map(o => (
+                  <button key={o.id} type="button" onClick={() => setNewUserOwnerIds(v => v.includes(o.id) ? v.filter(x => x !== o.id) : [...v, o.id])}
+                    className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${newUserOwnerIds.includes(o.id) ? "bg-[#2B6E63] text-white border-[#2B6E63]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>{o.name}</button>
+                ))}
+              </div>
+              <label className="flex items-center gap-2 mb-3 text-sm font-medium">
+                <input type="checkbox" checked={newUserOwnerCanIn} onChange={e => setNewUserOwnerCanIn(e.target.checked)} /> Can record "Cash to Owner" (in) — off means Owner Payment (out) only
+              </label>
               <button onClick={addUser} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add User</button>
             </div>
             {db.users.map(u => (
@@ -3666,6 +3697,20 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
                 <label className="flex items-center gap-2 mt-1.5 text-xs font-semibold text-[#5C6B62]">
                   <input type="checkbox" checked={!!u.canBackdate} onChange={() => toggleUserBackdate(u.id)} /> Can pick a past date when adding entries
                 </label>
+                {(db.owners || []).length > 0 && (
+                  <React.Fragment>
+                    <div className="text-[10px] uppercase tracking-wide font-semibold text-[#8A9690] mt-2 mb-1">Owners visible (blank = all)</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(db.owners || []).map(o => (
+                        <button key={o.id} onClick={() => toggleUserOwnerId(u.id, o.id)}
+                          className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${(u.ownerIds || []).includes(o.id) ? "bg-[#2B6E63] text-white border-[#2B6E63]" : "bg-[#F7F5F0] border-[#D8D2C2] text-[#5C6B62]"}`}>{o.name}</button>
+                      ))}
+                    </div>
+                    <label className="flex items-center gap-2 mt-1.5 text-xs font-semibold text-[#5C6B62]">
+                      <input type="checkbox" checked={u.canRecordOwnerIn !== false} onChange={() => toggleUserOwnerCanIn(u.id)} /> Can record "Cash to Owner" (in) — off means Owner Payment (out) only
+                    </label>
+                  </React.Fragment>
+                )}
               </div>
             ))}
           </React.Fragment>
