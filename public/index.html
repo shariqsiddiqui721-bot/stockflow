@@ -281,7 +281,29 @@ async function fetchGoogleSheetTab(sheetId, tabName, force) {
   const text = await res.text();
   const wb = XLSX.read(text, { type: "string" });
   const sheet = wb.Sheets[wb.SheetNames[0]];
-  return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+  // raw:false makes SheetJS return the cell's formatted display text (e.g. "2026-08-17") instead of a
+  // raw spreadsheet serial-date number for genuinely date-typed cells.
+  return XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+}
+
+// Combines a date-only string ("2026-08-17") with a 12-hour time string ("2:34:55 pm") into one Date.
+function parseDateTimeParts(dateStr, timeStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  if (timeStr) {
+    const m = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?m\.?)?$/i);
+    if (m) {
+      let h = parseInt(m[1], 10);
+      const min = parseInt(m[2], 10);
+      const sec = m[3] ? parseInt(m[3], 10) : 0;
+      const ampm = m[4] ? m[4].toLowerCase().replace(/\./g, "") : null;
+      if (ampm === "pm" && h !== 12) h += 12;
+      if (ampm === "am" && h === 12) h = 0;
+      d.setHours(h, min, sec, 0);
+    }
+  }
+  return d;
 }
 
 // "2 x Chicken Biryani, 1 x Naan" -> [{ name: "Chicken Biryani", qty: 2 }, { name: "Naan", qty: 1 }]
@@ -1615,18 +1637,18 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   }, [tab]);
 
   // A row only counts if it has a real, parseable date. The sheet's format changed partway through:
-  // older rows had one combined ISO datetime in "Date"; newer rows (19 Aug onward) split it into
-  // separate "Date" and "Time" fields. Both are tried; rows matching neither (pre-19 Aug misaligned
-  // data) are excluded rather than silently defaulting to 1 Jan 1970.
+  // older rows had one combined ISO datetime in "Date" (Time blank); newer rows (19 Aug onward) split
+  // it into a plain date in "Date" ("2026-08-17") and a 12-hour clock time in "Time" ("2:34:55 pm").
+  // Both are tried; rows matching neither are excluded rather than silently defaulting to 1 Jan 1970.
   const validBusinessDate = (row) => {
     const dateRaw = row && row.Date, timeRaw = row && row.Time;
     if (!dateRaw) return null;
-    let d = new Date(dateRaw);
+    // New format: date-only + separate 12-hour time.
+    let d = parseDateTimeParts(dateRaw, timeRaw);
+    if (d && !isNaN(d.getTime()) && d.getFullYear() >= 2020) return businessDateOf(d);
+    // Old format: one combined ISO datetime already in "Date".
+    d = new Date(dateRaw);
     if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) return businessDateOf(d);
-    if (timeRaw) {
-      d = new Date(`${dateRaw}T${timeRaw}`);
-      if (!isNaN(d.getTime()) && d.getFullYear() >= 2020) return businessDateOf(d);
-    }
     return null;
   };
   const posSalesUndated = (posSalesRows || []).filter(r => !validBusinessDate(r)).length;
