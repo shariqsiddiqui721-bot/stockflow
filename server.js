@@ -207,6 +207,13 @@ const SEED = {
   posSales: [],
   posApiKey: null,
   posSheetLink: null,
+  owners: [
+    { id: "own1", name: "Shariq" },
+    { id: "own2", name: "Farrukh" },
+    { id: "own3", name: "Sameer" },
+  ],
+  ownerModeDefaults: { cash: null, easypaisa: "own3", jazzcash: "own2", bank: "own2" },
+  ownerOverrides: {},
   posLossReasons: [],
   users: [
     { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "payment", "reports", "admin"], branches: ["Store", "FB", "North", "BBQ"], kitchens: [], notifications: true },
