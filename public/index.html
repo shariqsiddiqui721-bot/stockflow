@@ -1343,6 +1343,7 @@ function OwnerTransactionScreen({ db, session, persist, addLog, flash, onDone })
   const [payOwnerChoice, setPayOwnerChoice] = useState("__other__");
   const [payOwnerOther, setPayOwnerOther] = useState("");
   const [payMode, setPayMode] = useState("cash"); // cash | jazzcash | easypaisa | bank
+  const [inMode, setInMode] = useState("cash"); // mode the "Cash to Owner" side actually came in via
 
   const resolvedPaidTo = () => {
     if (payCategory === "personal") return "Personal Use";
@@ -1358,17 +1359,27 @@ function OwnerTransactionScreen({ db, session, persist, addLog, flash, onDone })
     if (!amt || amt <= 0) { flash("Enter a valid amount", "error"); return; }
     const paidTo = direction === "out" ? resolvedPaidTo() : null;
     if (direction === "out" && !paidTo) { flash("Select or write who the owner paid", "error"); return; }
+    const ownerName = (db.owners || []).find(o => o.id === ownerId)?.name;
+    const linkId = uid("link");
     const rec = {
       id: uid("otx"), date: entryDate, ownerId, direction, amount: amt,
       branch: direction === "in" ? branch : null,
       paidTo, paidCategory: direction === "out" ? payCategory : null,
-      payMode: direction === "out" ? payMode : null,
-      note: note.trim(), userId: session.id,
+      payMode: direction === "out" ? payMode : inMode,
+      note: note.trim(), userId: session.id, linkId,
     };
-    const next = { ...db, ownerTransactions: [rec, ...(db.ownerTransactions || [])] };
-    const ownerName = (db.owners || []).find(o => o.id === ownerId)?.name;
+    const records = [rec];
+    // Paying another owner directly is a transfer: it must show as OUT for the payer and IN for the receiver.
+    if (direction === "out" && payCategory === "owner" && payOwnerChoice !== "__other__") {
+      records.push({
+        id: uid("otx"), date: entryDate, ownerId: payOwnerChoice, direction: "in", amount: amt,
+        branch: null, paidTo: null, paidCategory: null, payMode,
+        note: `From ${ownerName}${note.trim() ? " — " + note.trim() : ""}`, userId: session.id, linkId,
+      });
+    }
+    const next = { ...db, ownerTransactions: [...records, ...(db.ownerTransactions || [])] };
     addLog(next, "Owner Transaction", direction === "in"
-      ? `${money(amt)} cash from ${branch} to ${ownerName}`
+      ? `${money(amt)} via ${inMode} from ${branch} to ${ownerName}`
       : `${ownerName} paid ${money(amt)} to ${paidTo} via ${payMode}`);
     persist(next);
     flash("Saved"); setAmount(""); setNote(""); setPaySupplierOther(""); setPayBranchOther(""); setPayOwnerOther("");
@@ -1398,9 +1409,18 @@ function OwnerTransactionScreen({ db, session, persist, addLog, flash, onDone })
           <input className={numCls} type="number" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" />
         </Field>
         {direction === "in" ? (
-          <Field label="From Branch">
-            <select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select>
-          </Field>
+          <React.Fragment>
+            <Field label="From Branch">
+              <select className={selCls} value={branch} onChange={e => setBranch(e.target.value)}>{myBranches.map(b => <option key={b}>{b}</option>)}</select>
+            </Field>
+            <Field label="Received Via">
+              <div className="grid grid-cols-4 gap-1.5">
+                {["cash", "jazzcash", "easypaisa", "bank"].map(m => (
+                  <button key={m} onClick={() => setInMode(m)} className={`py-2 rounded-lg text-[11px] font-semibold capitalize border-2 ${inMode === m ? "bg-[#2B6E63] text-white border-[#2B6E63]" : "bg-white border-[#D8D2C2] text-[#5C6B62]"}`}>{m}</button>
+                ))}
+              </div>
+            </Field>
+          </React.Fragment>
         ) : (
           <React.Fragment>
             <Field label="Paid To">
@@ -1755,6 +1775,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   const [expandedVoidItem, setExpandedVoidItem] = useState(null);
   const [lossReasonFor, setLossReasonFor] = useState(null);
   const [editOwnerFor, setEditOwnerFor] = useState(null);
+  const [editInModeFor, setEditInModeFor] = useState(null);
+  const [ownerLedgerExpanded, setOwnerLedgerExpanded] = useState({});
   const [lossReasonText, setLossReasonText] = useState("");
 
   const loadPosSales = async (force) => {
@@ -2663,8 +2685,10 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
         })()}
         {tab === "Owner Ledger" && (() => {
           const ownerName = (id) => (db.owners || []).find(o => o.id === id)?.name;
-          const groups = {}; // ownerId|"cash" -> { total, in, out, txns: [] }
-          const ensure = (key, label) => groups[key] || (groups[key] = { label, total: 0, in: 0, out: 0, txns: [] });
+          const MODES = ["cash", "easypaisa", "jazzcash", "bank"];
+          const blankModes = () => ({ cash: { in: 0, out: 0 }, easypaisa: { in: 0, out: 0 }, jazzcash: { in: 0, out: 0 }, bank: { in: 0, out: 0 } });
+          const groups = {}; // ownerId|"cash" -> { total, in, out, personalUse, modes, txns: [] }
+          const ensure = (key, label) => groups[key] || (groups[key] = { label, total: 0, in: 0, out: 0, personalUse: 0, modes: blankModes(), txns: [] });
 
           // Auto: POS collections (only if a sheet is connected and loaded)
           if (posSheetId && posSalesRows) {
@@ -2673,73 +2697,123 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
               const amount = Number(r["Grand Total"]) || 0;
               if (mode === "cash") {
                 const g = ensure("cash", "Branch (Cash)");
-                g.total += amount; g.in += amount;
-                g.txns.push({ kind: "pos", date: businessDateOf(parseDateTimeParts(r.Date, r.Time) || r.Date), label: `${r["Invoice No"]} · ${mapPosBranch(r.Branch)} · cash`, amount, invoice: r["Invoice No"] });
+                g.total += amount; g.in += amount; g.modes.cash.in += amount;
+                g.txns.push({ kind: "pos", dir: "in", mode: "cash", date: businessDateOf(parseDateTimeParts(r.Date, r.Time) || r.Date), label: `${r["Invoice No"]} · ${mapPosBranch(r.Branch)} · cash`, amount, invoice: r["Invoice No"] });
                 return;
               }
               const ownerId = ownerFor(r["Invoice No"], mode);
               const key = ownerId || "unassigned";
               const g = ensure(key, ownerId ? ownerName(ownerId) : "Unassigned");
-              g.total += amount; g.in += amount;
-              g.txns.push({ kind: "pos", date: businessDateOf(parseDateTimeParts(r.Date, r.Time) || r.Date), label: `${r["Invoice No"]} · ${mapPosBranch(r.Branch)} · ${String(r["Payment Method"]).toLowerCase()}`, amount, invoice: r["Invoice No"], ownerKey: key });
+              g.total += amount; g.in += amount; g.modes[mode].in += amount;
+              g.txns.push({ kind: "pos", dir: "in", mode, date: businessDateOf(parseDateTimeParts(r.Date, r.Time) || r.Date), label: `${r["Invoice No"]} · ${mapPosBranch(r.Branch)} · ${mode}`, amount, invoice: r["Invoice No"], ownerKey: key });
             });
           }
 
-          // Manual: cash handed to owner (in) and owner payments out
+          // Manual: cash/other handed to owner (in), owner payments out, owner-to-owner transfers (both sides)
           (db.ownerTransactions || []).filter(t => !dateFilter || t.date === dateFilter).forEach(t => {
             const key = t.ownerId;
             const g = ensure(key, ownerName(key) || "Unknown Owner");
+            const mode = t.payMode || "cash";
             if (t.direction === "in") {
-              g.total += t.amount; g.in += t.amount;
-              g.txns.push({ kind: "manual-in", date: t.date, label: `Cash from ${t.branch}${t.note ? " — " + t.note : ""}`, amount: t.amount });
+              g.total += t.amount; g.in += t.amount; g.modes[mode].in += t.amount;
+              g.txns.push({ kind: "manual-in", dir: "in", mode, date: t.date, label: t.branch ? `From ${t.branch}${t.note ? " — " + t.note : ""}` : (t.note || "Transfer received"), amount: t.amount, recId: t.id });
             } else {
-              g.total -= t.amount; g.out += t.amount;
-              g.txns.push({ kind: "manual-out", date: t.date, label: `Paid to ${t.paidTo} (${t.payMode || "cash"})${t.note ? " — " + t.note : ""}`, amount: -t.amount });
+              g.total -= t.amount; g.out += t.amount; g.modes[mode].out += t.amount;
+              if (t.paidCategory === "personal") g.personalUse += t.amount;
+              g.txns.push({ kind: "manual-out", dir: "out", mode, date: t.date, label: `Paid to ${t.paidTo}${t.note ? " — " + t.note : ""}`, amount: -t.amount, recId: t.id });
             }
           });
 
           const groupList = Object.entries(groups).sort((a, b) => b[1].total - a[1].total);
           const grandNet = groupList.reduce((a, [, g]) => a + g.total, 0);
+          const changeInMode = (recId, newMode) => {
+            const next = { ...db, ownerTransactions: (db.ownerTransactions || []).map(t => t.id === recId ? { ...t, payMode: newMode } : t) };
+            persist(next);
+          };
           return (
             <ReportTable
               title={dateFilter ? `Owner Ledger — ${dateFilter}` : "Owner Ledger — All Time"}
               onExport={() => downloadCSV("owner-ledger.csv", toCSV(
-                groupList.flatMap(([, g]) => g.txns.map(t => ({ owner: g.label, detail: t.label, amount: t.amount, date: t.date }))),
-                [{ label: "Owner/Bucket", get: t => t.owner }, { label: "Detail", get: t => t.detail }, { label: "Amount", get: t => t.amount }, { label: "Date", get: t => t.date }]
+                groupList.flatMap(([, g]) => g.txns.map(t => ({ owner: g.label, detail: t.label, mode: t.mode, amount: t.amount, date: t.date }))),
+                [{ label: "Owner/Bucket", get: t => t.owner }, { label: "Detail", get: t => t.detail }, { label: "Mode", get: t => t.mode }, { label: "Amount", get: t => t.amount }, { label: "Date", get: t => t.date }]
               ))}
             >
               {!posSheetId && <div className="text-[11px] text-[#B3562C] mb-3">No Google Sheet linked — showing manually recorded transactions only. Digital collections (Easypaisa/JazzCash/Bank) won't appear until Admin → POS has a sheet link.</div>}
-              <div className="text-sm font-semibold mb-3">Net across all owners: <span className="font-mono">{money(grandNet)}</span></div>
-              {groupList.map(([key, g]) => (
-                <div key={key} className="mb-4">
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-sm font-bold text-[#1F2A24]">{g.label}</span>
-                    <span className="font-mono font-bold text-sm">{money(g.total)}</span>
-                  </div>
-                  <div className="text-[10px] text-[#8A9690] mb-1">In: {money(g.in)} · Out: {money(g.out)}</div>
-                  {g.txns.slice(0, 50).map((t, idx) => (
-                    <div key={idx} className="flex justify-between items-center py-1.5 border-t border-[#EFEBDF] first:border-t-0 text-[11px]">
-                      <div className="text-[#5C6B62]">
-                        {t.label}
-                        {t.kind === "pos" && key !== "cash" && (
-                          editOwnerFor === t.invoice ? (
-                            <select autoFocus className="ml-2 text-[11px] border rounded px-1 py-0.5" defaultValue={t.ownerKey === "unassigned" ? "" : t.ownerKey}
-                              onChange={e => { setOwnerOverride(t.invoice, e.target.value); setEditOwnerFor(null); }}
-                              onBlur={() => setEditOwnerFor(null)}>
-                              <option value="">— unassigned —</option>
-                              {(db.owners || []).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-                            </select>
-                          ) : (
-                            <button onClick={() => setEditOwnerFor(t.invoice)} className="ml-2 text-[#4A6FA5] font-semibold">change</button>
-                          )
-                        )}
-                      </div>
-                      <div className={`font-mono ${t.amount < 0 ? "text-[#B33A3A]" : ""}`}>{money(t.amount)}</div>
+              <div className="text-sm font-semibold mb-4">Net across all owners: <span className="font-mono">{money(grandNet)}</span></div>
+              {groupList.map(([key, g]) => {
+                const inTxns = g.txns.filter(t => t.dir === "in");
+                const outTxns = g.txns.filter(t => t.dir === "out");
+                return (
+                  <div key={key} className="mb-5 pb-4 border-b-2 border-[#EAE4D4] last:border-b-0">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-base font-bold text-[#1F2A24]">{g.label}</span>
+                      <span className="font-mono font-bold text-base">{money(g.total)}</span>
                     </div>
-                  ))}
-                  {g.txns.length > 50 && <div className="text-[10px] text-[#8A9690] mt-1">+ {g.txns.length - 50} more</div>}
-                </div>
-              ))}
+                    {key !== "cash" && (
+                      <div className="grid grid-cols-4 gap-1.5 mb-2">
+                        {MODES.map(m => (
+                          <div key={m} className="bg-[#F7F5F0] rounded-lg p-1.5 text-center">
+                            <div className="text-[9px] uppercase text-[#8A9690] font-semibold capitalize">{m}</div>
+                            <div className="font-mono font-bold text-[11px]">{money(g.modes[m].in - g.modes[m].out)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {g.personalUse > 0 && <div className="text-[11px] text-[#B3562C] mb-2">Personal use: {money(g.personalUse)}</div>}
+                    <div className="flex gap-2 mb-1">
+                      <button onClick={() => setOwnerLedgerExpanded(prev => ({ ...prev, [key + "-in"]: !prev[key + "-in"] }))} className="text-xs font-semibold text-[#2B6E63] bg-[#2B6E63]/10 px-3 py-1.5 rounded-full">In: {money(g.in)} {ownerLedgerExpanded[key + "-in"] ? "▲" : "▼"}</button>
+                      <button onClick={() => setOwnerLedgerExpanded(prev => ({ ...prev, [key + "-out"]: !prev[key + "-out"] }))} className="text-xs font-semibold text-[#B33A3A] bg-[#B33A3A]/10 px-3 py-1.5 rounded-full">Out: {money(g.out)} {ownerLedgerExpanded[key + "-out"] ? "▲" : "▼"}</button>
+                    </div>
+                    {ownerLedgerExpanded[key + "-in"] && (
+                      <div className="mt-1 mb-2">
+                        {inTxns.length === 0 && <div className="text-[11px] text-[#8A9690] py-1">No in entries.</div>}
+                        {inTxns.map((t, idx) => (
+                          <div key={idx} className="flex justify-between items-center py-1.5 border-t border-[#EFEBDF] first:border-t-0 text-[11px]">
+                            <div className="text-[#5C6B62]">
+                              {t.label} <span className="text-[#8A9690]">({t.mode})</span>
+                              {t.kind === "pos" && key !== "cash" && (
+                                editOwnerFor === t.invoice ? (
+                                  <select autoFocus className="ml-2 text-[11px] border rounded px-1 py-0.5" defaultValue={t.ownerKey === "unassigned" ? "" : t.ownerKey}
+                                    onChange={e => { setOwnerOverride(t.invoice, e.target.value); setEditOwnerFor(null); }}
+                                    onBlur={() => setEditOwnerFor(null)}>
+                                    <option value="">— unassigned —</option>
+                                    {(db.owners || []).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                                  </select>
+                                ) : (
+                                  <button onClick={() => setEditOwnerFor(t.invoice)} className="ml-2 text-[#4A6FA5] font-semibold">change owner</button>
+                                )
+                              )}
+                              {t.kind === "manual-in" && (
+                                editInModeFor === t.recId ? (
+                                  <select autoFocus className="ml-2 text-[11px] border rounded px-1 py-0.5" defaultValue={t.mode}
+                                    onChange={e => { changeInMode(t.recId, e.target.value); setEditInModeFor(null); }}
+                                    onBlur={() => setEditInModeFor(null)}>
+                                    {MODES.map(m => <option key={m} value={m}>{m}</option>)}
+                                  </select>
+                                ) : (
+                                  <button onClick={() => setEditInModeFor(t.recId)} className="ml-2 text-[#4A6FA5] font-semibold">change mode</button>
+                                )
+                              )}
+                            </div>
+                            <div className="font-mono">{money(t.amount)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {ownerLedgerExpanded[key + "-out"] && (
+                      <div className="mt-1">
+                        {outTxns.length === 0 && <div className="text-[11px] text-[#8A9690] py-1">No out entries.</div>}
+                        {outTxns.map((t, idx) => (
+                          <div key={idx} className="flex justify-between items-center py-1.5 border-t border-[#EFEBDF] first:border-t-0 text-[11px]">
+                            <div className="text-[#5C6B62]">{t.label} <span className="text-[#8A9690]">({t.mode})</span></div>
+                            <div className="font-mono text-[#B33A3A]">{money(t.amount)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
               {groupList.length === 0 && <div className="text-sm text-[#8A9690]">No owner activity in range.</div>}
             </ReportTable>
           );
