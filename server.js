@@ -214,6 +214,7 @@ const SEED = {
   ],
   ownerModeDefaults: { cash: null, easypaisa: "own3", jazzcash: "own2", bank: "own2" },
   ownerOverrides: {},
+  ownerTransactions: [],
   posLossReasons: [],
   users: [
     { id: "u1", name: "Ali", pin: "1234", permissions: ["purchase", "issue", "receive", "ending", "demand", "adjustment", "conversion", "payment", "reports", "admin"], branches: ["Store", "FB", "North", "BBQ"], kitchens: [], notifications: true },
