@@ -3634,6 +3634,44 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
               </div>
               <button onClick={addRecipe} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Recipe</button>
             </div>
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Bulk upload recipes (Excel/CSV columns: Recipe Name, Branch, Type, Item, Qty). Type is "Uses" or "Makes"; repeat the Recipe Name across rows to add multiple ingredients/outputs to the same recipe. Branch blank = any branch. Matches an existing recipe by exact name and replaces it; new names are added.</div>
+              <FileUploadRow flash={flash} parser={parseMultiColFile} emptyMsg="No rows found — check the file has Recipe Name, Type, Item, and Qty columns" onRows={(rows) => {
+                const byName = {};
+                let unmatchedItems = 0, badType = 0, skipped = 0;
+                rows.forEach(r => {
+                  const rName = String(r["Recipe Name"] || r.Recipe || r.name || "").trim();
+                  const branch = String(r.Branch || r.branch || "").trim();
+                  const type = String(r.Type || r.type || "").trim().toLowerCase();
+                  const itemName = String(r.Item || r.item || "").trim();
+                  const qty = Number(r.Qty || r.qty);
+                  if (!rName || !itemName || !qty) { skipped++; return; }
+                  const item = db.items.find(i => i.name.toLowerCase() === itemName.toLowerCase());
+                  if (!item) { unmatchedItems++; return; }
+                  if (type !== "uses" && type !== "makes") { badType++; return; }
+                  if (!byName[rName]) byName[rName] = { name: rName, branch: branch || null, consumes: [], produces: [] };
+                  const list = type === "uses" ? byName[rName].consumes : byName[rName].produces;
+                  list.push({ itemId: item.id, qty });
+                });
+                const parsed = Object.values(byName).filter(r => r.consumes.length > 0 && r.produces.length > 0);
+                const incomplete = Object.values(byName).length - parsed.length;
+                let recipes = [...(db.recipes || [])];
+                let added = 0, updated = 0;
+                parsed.forEach(r => {
+                  const idx = recipes.findIndex(x => x.name.toLowerCase() === r.name.toLowerCase());
+                  if (idx >= 0) { recipes[idx] = { ...recipes[idx], branch: r.branch, consumes: r.consumes, produces: r.produces }; updated++; }
+                  else { recipes.push({ id: uid("rcp"), ...r }); added++; }
+                });
+                const next = { ...db, recipes };
+                addLog(next, "Admin", `Uploaded recipes: ${added} added, ${updated} updated`);
+                persist(next);
+                let msg = `${added} added, ${updated} updated`;
+                if (unmatchedItems) msg += `, ${unmatchedItems} item name(s) not found`;
+                if (badType) msg += `, ${badType} row(s) had a bad Type`;
+                if (incomplete) msg += `, ${incomplete} recipe(s) skipped (need at least one Uses and one Makes)`;
+                flash(msg);
+              }} />
+            </div>
             {(db.recipes || []).map(r => (
               editRecipeId === r.id ? (
                 <div key={r.id} className="bg-white rounded-lg p-3 mb-1.5 border-2 border-[#C98A2C]">
