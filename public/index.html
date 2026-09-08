@@ -995,12 +995,10 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
   const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
   const activeKitchen = myKitchens.find(k => k.id === kitchenId);
   const kitchenItemIds = activeKitchen && activeKitchen.itemIds && activeKitchen.itemIds.length ? activeKitchen.itemIds : null;
-  const myCategories = categoriesForUser(db, session, kitchenItemIds);
-  const [category, setCategory] = useState(myCategories[0] || db.categories[0]);
-  useEffect(() => { if (!myCategories.includes(category)) setCategory(myCategories[0] || ""); }, [kitchenId, branch]);
+  const myCategories = orderCategories(categoriesForUser(db, session, kitchenItemIds));
   const [values, setValues] = useState({});
-  const items = itemsForUser(db, session, db.items.filter(i => i.category === category && (!kitchenItemIds || kitchenItemIds.includes(i.id))));
-  useEffect(() => { setValues({}); }, [category, branch, kitchenId]);
+  const allItems = itemsForUser(db, session, db.items.filter(i => !kitchenItemIds || kitchenItemIds.includes(i.id)));
+  useEffect(() => { setValues({}); }, [branch, kitchenId]);
   useEffect(() => { setKitchenId(myKitchensFor(db, session, branch)[0]?.id || ""); }, [branch]);
   const entries = Object.entries(values).filter(([, v]) => v !== "" && v !== undefined);
 
@@ -1033,9 +1031,17 @@ function EndingScreen({ db, session, persist, addLog, flash, onDone }) {
             </select>
           </Field>
         )}
-        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{myCategories.map(c => <option key={c}>{c}</option>)}</select></Field>
-        <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Closing Count</div>
-        <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
+        {myCategories.map(cat => {
+          const catItems = allItems.filter(i => i.category === cat);
+          if (catItems.length === 0) return null;
+          return (
+            <div key={cat} className="mb-5">
+              <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">{cat}</div>
+              <ItemQtyGrid items={catItems} values={values} setValues={setValues} />
+            </div>
+          );
+        })}
+        {myCategories.length === 0 && <div className="text-sm text-[#8A9690] mb-4">No items available for this selection.</div>}
         <button className={btnPrimary} onClick={save}>Save Ending</button>
       </div>
     </div>
@@ -1541,7 +1547,11 @@ function ConfirmReceiptScreen({ db, session, persist, addLog, flash, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
   const kitchenName = (id) => (db.kitchens || []).find(k => k.id === id)?.name;
-  const pending = db.issues.filter(x => !x.confirmed && myBranches.includes(x.to)).sort((a, b) => tsOf(b) - tsOf(a));
+  // If the user is restricted to specific kitchens, they should only see deliveries addressed to
+  // one of THEIR kitchens (or branch-general deliveries with no kitchen) — not every kitchen's mail.
+  const myKitchenIds = (session.kitchens && session.kitchens.length) ? session.kitchens : null;
+  const visibleToMe = (x) => myBranches.includes(x.to) && (!x.kitchenId || !myKitchenIds || myKitchenIds.includes(x.kitchenId));
+  const pending = db.issues.filter(x => !x.confirmed && visibleToMe(x)).sort((a, b) => tsOf(b) - tsOf(a));
   const TEN_MIN = 10 * 60 * 1000;
   const recent = db.issues.filter(x => x.confirmed && x.confirmedBy === session.id && x.confirmedTs && (Date.now() - x.confirmedTs) < TEN_MIN).sort((a, b) => b.confirmedTs - a.confirmedTs);
   const [openId, setOpenId] = useState(null);
@@ -1636,12 +1646,10 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
   const [kitchenId, setKitchenId] = useState(myKitchens[0]?.id || "");
   const activeKitchen = myKitchens.find(k => k.id === kitchenId);
   const kitchenItemIds = activeKitchen && activeKitchen.itemIds && activeKitchen.itemIds.length ? activeKitchen.itemIds : null;
-  const myCategories = categoriesForUser(db, session, kitchenItemIds);
-  const [category, setCategory] = useState(myCategories[0] || db.categories[0]);
-  useEffect(() => { if (!myCategories.includes(category)) setCategory(myCategories[0] || ""); }, [kitchenId, branch]);
+  const myCategories = orderCategories(categoriesForUser(db, session, kitchenItemIds));
   const [values, setValues] = useState({});
-  const items = itemsForUser(db, session, db.items.filter(i => i.category === category && (!kitchenItemIds || kitchenItemIds.includes(i.id))));
-  useEffect(() => { setValues({}); }, [category, branch, kitchenId]);
+  const allItems = itemsForUser(db, session, db.items.filter(i => !kitchenItemIds || kitchenItemIds.includes(i.id)));
+  useEffect(() => { setValues({}); }, [branch, kitchenId]);
   useEffect(() => { setKitchenId(myKitchensFor(db, session, branch)[0]?.id || ""); }, [branch]);
   const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
 
@@ -1674,9 +1682,17 @@ function DemandScreen({ db, session, persist, addLog, flash, onDone }) {
             </select>
           </Field>
         )}
-        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{myCategories.map(c => <option key={c}>{c}</option>)}</select></Field>
-        <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Quantity Required</div>
-        <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} /></div>
+        {myCategories.map(cat => {
+          const catItems = allItems.filter(i => i.category === cat);
+          if (catItems.length === 0) return null;
+          return (
+            <div key={cat} className="mb-5">
+              <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">{cat}</div>
+              <ItemQtyGrid items={catItems} values={values} setValues={setValues} />
+            </div>
+          );
+        })}
+        {myCategories.length === 0 && <div className="text-sm text-[#8A9690] mb-4">No items available for this selection.</div>}
         <button className={btnPrimary} onClick={save}>Save Demand</button>
       </div>
     </div>
