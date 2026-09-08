@@ -266,6 +266,15 @@ function categoriesForUser(db, session, kitchenItemIds) {
   return db.categories.filter(c => cats.includes(c));
 }
 
+// Preferred display order for category sections (e.g. the combined Issue list): named ones first,
+// in this order, then anything else in whatever order the categories already exist in.
+const CATEGORY_DISPLAY_ORDER = ["Dumba", "Chicken", "Beef", "Vegetable", "GS", "Masala", "Cocacola", "BBQ"];
+function orderCategories(categories) {
+  const named = CATEGORY_DISPLAY_ORDER.filter(c => categories.includes(c));
+  const rest = categories.filter(c => !CATEGORY_DISPLAY_ORDER.includes(c));
+  return [...named, ...rest];
+}
+
 // Pulls the DesiFlow Google Sheet ID out of a normal share link.
 function extractSheetId(url) {
   const m = (url || "").match(/\/d\/([a-zA-Z0-9_-]+)/);
@@ -343,8 +352,38 @@ function parseTwoColFile(file) {
   });
 }
 
+// Reads any Excel/CSV file into an array of row objects keyed by the header row's column names
+// (e.g. a "Name" column becomes row.Name), trimmed strings. Used for multi-column bulk imports
+// (items, suppliers, kitchen item lists) where a simple name/value pair isn't enough.
+function parseMultiColFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const wb = XLSX.read(data, { type: "array" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+        const cleaned = rows.map(r => {
+          const out = {};
+          Object.entries(r).forEach(([k, v]) => { out[String(k).trim()] = typeof v === "string" ? v.trim() : v; });
+          return out;
+        });
+        resolve(cleaned);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error("Could not read file"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// Splits a "Chicken, Beef; Rice" style cell into a clean list of names.
+function splitNameList(text) {
+  return String(text || "").split(/[,;]/).map(s => s.trim()).filter(Boolean);
+}
+
 // A file-picker + "Upload" button. Calls onRows(parsedRows) once a file is chosen and parsed.
-function FileUploadRow({ onRows, flash, label }) {
+function FileUploadRow({ onRows, flash, label, parser, emptyMsg }) {
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef(null);
@@ -352,8 +391,8 @@ function FileUploadRow({ onRows, flash, label }) {
     if (!file) { flash("Choose a file first", "error"); return; }
     setBusy(true);
     try {
-      const rows = await parseTwoColFile(file);
-      if (rows.length === 0) { flash("No valid rows found — expect column A = name, column B = amount/qty", "error"); setBusy(false); return; }
+      const rows = await (parser || parseTwoColFile)(file);
+      if (rows.length === 0) { flash(emptyMsg || "No valid rows found — expect column A = name, column B = amount/qty", "error"); setBusy(false); return; }
       onRows(rows);
       setFile(null);
       if (inputRef.current) inputRef.current.value = "";
@@ -884,11 +923,12 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
   const [to, setTo] = useState(BRANCHES.find(b => b !== myBranches[0]) || BRANCHES[1]);
   const toKitchens = kitchensOf(db, to);
   const [kitchenId, setKitchenId] = useState("");
-  const myCategories = categoriesForUser(db, session, null);
-  const [category, setCategory] = useState(myCategories[0] || db.categories[0]);
+  const activeToKitchen = toKitchens.find(k => k.id === kitchenId);
+  const toKitchenItemIds = activeToKitchen && activeToKitchen.itemIds && activeToKitchen.itemIds.length ? activeToKitchen.itemIds : null;
+  const myCategories = orderCategories(categoriesForUser(db, session, toKitchenItemIds));
   const [values, setValues] = useState({});
-  const items = itemsForUser(db, session, db.items.filter(i => i.category === category));
-  useEffect(() => { setValues({}); }, [category, from, to, kitchenId]);
+  const allItems = itemsForUser(db, session, db.items.filter(i => !toKitchenItemIds || toKitchenItemIds.includes(i.id)));
+  useEffect(() => { setValues({}); }, [from, to, kitchenId]);
   useEffect(() => { setKitchenId(""); }, [to]);
   const entries = Object.entries(values).filter(([, v]) => Number(v) > 0);
   const anyOver = entries.some(([id, v]) => Number(v) > stockOf(from, id));
@@ -927,9 +967,17 @@ function IssueScreen({ db, session, persist, addLog, flash, stockOf, onDone }) {
             </select>
           </Field>
         )}
-        <Field label="Item Category"><select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>{myCategories.map(c => <option key={c}>{c}</option>)}</select></Field>
-        <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">Items & Quantity</div>
-        <div className="mb-5"><ItemQtyGrid items={items} values={values} setValues={setValues} stockCheck={(id) => stockOf(from, id)} /></div>
+        {myCategories.map(cat => {
+          const catItems = allItems.filter(i => i.category === cat);
+          if (catItems.length === 0) return null;
+          return (
+            <div key={cat} className="mb-5">
+              <div className="text-xs font-semibold uppercase tracking-wide text-[#5C6B62] mb-1.5">{cat}</div>
+              <ItemQtyGrid items={catItems} values={values} setValues={setValues} stockCheck={(id) => stockOf(from, id)} />
+            </div>
+          );
+        })}
+        {myCategories.length === 0 && <div className="text-sm text-[#8A9690] mb-4">No items available to issue for this selection.</div>}
         <button className={btnPrimary} onClick={save}>Save Issue</button>
       </div>
     </div>
@@ -1696,7 +1744,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Customer Reviews", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Owner Ledger", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Labor Data", "Customer Reviews", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Owner Ledger", "Activity Log"];
 const POS_BRANCH_MAP = { "Federal B Area": "FB", "North Nazimabad": "North" };
 const mapPosBranch = (b) => POS_BRANCH_MAP[b] || b;
 
@@ -1780,6 +1828,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   const [lossReasonFor, setLossReasonFor] = useState(null);
   const [editOwnerFor, setEditOwnerFor] = useState(null);
   const [editInModeFor, setEditInModeFor] = useState(null);
+  const [laborExpanded, setLaborExpanded] = useState({}); // "laborId-absent"|"laborId-paid"|"laborId-due" -> bool
   const [ownerLedgerExpanded, setOwnerLedgerExpanded] = useState({});
   const [lossReasonText, setLossReasonText] = useState("");
 
@@ -2379,31 +2428,102 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
         {tab === "Labor" && (() => {
           const laborsVisible = (db.labors || []).filter(l => !l.branch || myBranches.includes(l.branch));
           const rows = laborsVisible.map(l => {
-            const att = (db.attendance || []).filter(a => a.laborId === l.id && (!dateFilter || a.date === dateFilter));
+            const allAtt = (db.attendance || []).filter(a => a.laborId === l.id);
+            const att = allAtt.filter(a => !dateFilter || a.date === dateFilter);
             const present = att.filter(a => a.status === "present").length;
             const late = att.filter(a => a.status === "late").length;
-            const absent = att.filter(a => a.status === "absent").length;
+            const absentDates = att.filter(a => a.status === "absent").map(a => a.date).sort();
             const accrued = (present + late) * l.dailyWage;
-            const paid = (db.laborPayments || []).filter(p => p.laborId === l.id && (!dateFilter || p.date === dateFilter)).reduce((a, p) => a + p.amount, 0);
+            const payments = (db.laborPayments || []).filter(p => p.laborId === l.id && (!dateFilter || p.date === dateFilter)).sort((a, b) => a.date < b.date ? -1 : 1);
+            const paid = payments.reduce((a, p) => a + p.amount, 0);
             const opening = dateFilter ? 0 : Number(l.openingDue || 0);
-            return { labor: l, present, late, absent, accrued, paid, opening, due: opening + accrued - paid };
+            const due = opening + accrued - paid;
+            // Which specific worked days are still unpaid: settle chronologically, oldest first, against total paid.
+            const workedDates = allAtt.filter(a => a.status === "present" || a.status === "late").map(a => a.date).sort();
+            const totalPaidAllTime = (db.laborPayments || []).filter(p => p.laborId === l.id).reduce((a, p) => a + p.amount, 0);
+            // Opening due is settled first (it predates any tracked attendance); only payments beyond
+            // that count toward specific worked days, oldest day first.
+            const remainingAfterOpening = totalPaidAllTime - Number(l.openingDue || 0);
+            const settledCount = l.dailyWage > 0 && remainingAfterOpening > 0 ? Math.floor(remainingAfterOpening / l.dailyWage) : 0;
+            const dueDates = workedDates.slice(Math.max(0, settledCount)).filter(d => !dateFilter || d <= dateFilter);
+            return { labor: l, present, late, absentDates, accrued, paid, payments, opening, due, dueDates };
           });
           return (
             <ReportTable
               title={dateFilter ? `Labor — ${dateFilter}` : "Labor — All Time"}
               onExport={() => downloadCSV("labor.csv", toCSV(rows, [
-                { label: "Name", get: r => r.labor.name }, { label: "Present", get: r => r.present }, { label: "Late", get: r => r.late }, { label: "Absent", get: r => r.absent },
+                { label: "Name", get: r => r.labor.name }, { label: "Present", get: r => r.present }, { label: "Late", get: r => r.late }, { label: "Absent", get: r => r.absentDates.length },
                 { label: "Accrued", get: r => r.accrued }, { label: "Paid", get: r => r.paid }, { label: "Due", get: r => r.due },
+              ]))}
+            >
+              {rows.map(r => {
+                const key = r.labor.id;
+                return (
+                  <div key={key} className="py-2.5 border-t border-[#EFEBDF] first:border-t-0">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-semibold text-sm">{r.labor.name}</span>
+                      <span className={`font-mono font-bold text-sm ${r.due > 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{money(r.due)} due</span>
+                    </div>
+                    <div className="text-[11px] text-[#8A9690] flex flex-wrap gap-x-1 items-center">
+                      <span>Present {r.present} · Late {r.late} ·</span>
+                      <button onClick={() => setLaborExpanded(p => ({ ...p, [key + "-absent"]: !p[key + "-absent"] }))} className="text-[#B33A3A] font-semibold underline">Absent {r.absentDates.length}</button>
+                      <span>· Accrued {money(r.accrued)}{r.opening ? ` · Opening ${money(r.opening)}` : ""} ·</span>
+                      <button onClick={() => setLaborExpanded(p => ({ ...p, [key + "-paid"]: !p[key + "-paid"] }))} className="text-[#2B6E63] font-semibold underline">Paid {money(r.paid)}</button>
+                      {r.due > 0 && (
+                        <React.Fragment>
+                          <span>·</span>
+                          <button onClick={() => setLaborExpanded(p => ({ ...p, [key + "-due"]: !p[key + "-due"] }))} className="text-[#B3562C] font-semibold underline">Due dates</button>
+                        </React.Fragment>
+                      )}
+                    </div>
+                    {laborExpanded[key + "-absent"] && (
+                      <div className="mt-1.5 bg-[#FBEAEA] rounded-lg p-2 text-[11px] text-[#8A5050]">
+                        {r.absentDates.length === 0 ? "No absences in range." : r.absentDates.join(", ")}
+                      </div>
+                    )}
+                    {laborExpanded[key + "-paid"] && (
+                      <div className="mt-1.5 bg-[#EAF3F0] rounded-lg p-2 text-[11px] text-[#2B6E63]">
+                        {r.payments.length === 0 ? "No payments in range." : r.payments.map((p, idx) => (
+                          <div key={idx}>{p.date} — {money(p.amount)}{p.note ? " (" + p.note + ")" : ""}</div>
+                        ))}
+                      </div>
+                    )}
+                    {laborExpanded[key + "-due"] && (
+                      <div className="mt-1.5 bg-[#FBF0DD] rounded-lg p-2 text-[11px] text-[#7A5C2E]">
+                        {r.dueDates.length === 0 ? "No specific unpaid worked days found — due amount may come from opening balance." : `Payable for: ${r.dueDates.join(", ")}`}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {rows.length === 0 && <div className="text-sm text-[#8A9690]">No labor added yet.</div>}
+            </ReportTable>
+          );
+        })()}
+        {tab === "Labor Data" && (() => {
+          const laborsVisible = (db.labors || []).filter(l => !l.branch || myBranches.includes(l.branch)).filter(l => l.name.toLowerCase().includes(q.toLowerCase()));
+          const rows = laborsVisible.map(l => {
+            const accrued = (db.attendance || []).filter(a => a.laborId === l.id && (a.status === "present" || a.status === "late")).length * l.dailyWage;
+            const paid = (db.laborPayments || []).filter(p => p.laborId === l.id).reduce((a, p) => a + p.amount, 0);
+            const due = Number(l.openingDue || 0) + accrued - paid;
+            return { labor: l, due };
+          });
+          return (
+            <ReportTable
+              title="Labor Data — Details & Balance"
+              onExport={() => downloadCSV("labor-data.csv", toCSV(rows, [
+                { label: "Name", get: r => r.labor.name }, { label: "NIC", get: r => r.labor.nic }, { label: "Phone", get: r => r.labor.phone },
+                { label: "Branch", get: r => r.labor.branch || "any" }, { label: "Daily Wage", get: r => r.labor.dailyWage }, { label: "Balance Due", get: r => r.due },
               ]))}
             >
               {rows.map(r => (
                 <div key={r.labor.id} className="py-2.5 border-t border-[#EFEBDF] first:border-t-0">
-                  <div className="flex justify-between items-center mb-1">
+                  <div className="flex justify-between items-center mb-0.5">
                     <span className="font-semibold text-sm">{r.labor.name}</span>
-                    <span className={`font-mono font-bold text-sm ${r.due > 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{money(r.due)} due</span>
+                    <span className={`font-mono font-bold text-sm ${r.due > 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{money(r.due)}</span>
                   </div>
                   <div className="text-[11px] text-[#8A9690]">
-                    Present {r.present} · Late {r.late} · Absent {r.absent} · Accrued {money(r.accrued)}{r.opening ? ` · Opening ${money(r.opening)}` : ""} · Paid {money(r.paid)}
+                    {r.labor.nic || "no NIC on file"} · {r.labor.phone || "no phone on file"} · {r.labor.branch || "any branch"} · {money(r.labor.dailyWage)}/day
                   </div>
                 </div>
               ))}
@@ -3178,6 +3298,29 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
               </div>
               <button onClick={addItem} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add</button>
             </div>
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Bulk upload items (Excel/CSV columns: Name, Category, Unit, Urdu Name — Urdu optional). Matches existing items by name and updates them; new names are added.</div>
+              <FileUploadRow flash={flash} parser={parseMultiColFile} emptyMsg="No rows found — check the file has Name, Category, and Unit columns" onRows={(rows) => {
+                let added = 0, updated = 0, skipped = 0;
+                const newCats = new Set(db.categories);
+                let items = [...db.items];
+                rows.forEach(r => {
+                  const name = String(r.Name || r.name || "").trim();
+                  const category = String(r.Category || r.category || "").trim();
+                  const unit = String(r.Unit || r.unit || "").trim();
+                  const nameUr = String(r["Urdu Name"] || r["Name (Urdu)"] || r.Urdu || r.NameUr || "").trim();
+                  if (!name || !category) { skipped++; return; }
+                  newCats.add(category);
+                  const idx = items.findIndex(i => i.name.toLowerCase() === name.toLowerCase());
+                  if (idx >= 0) { items[idx] = { ...items[idx], category, unit: unit || items[idx].unit, nameUr: nameUr || items[idx].nameUr }; updated++; }
+                  else { items.push({ id: uid("item"), name, category, unit, nameUr }); added++; }
+                });
+                const next = { ...db, items, categories: [...newCats] };
+                addLog(next, "Admin", `Uploaded items: ${added} added, ${updated} updated, ${skipped} skipped`);
+                persist(next);
+                flash(`${added} added, ${updated} updated${skipped ? `, ${skipped} skipped` : ""}`);
+              }} />
+            </div>
             <input className={numCls + " font-sans mb-3"} placeholder={`Search ${db.items.length} items…`} value={itemQ} onChange={e => setItemQ(e.target.value)} />
             {db.items.filter(i => i.name.toLowerCase().includes(itemQ.toLowerCase())).map(i => (
               editItemId === i.id ? (
@@ -3228,6 +3371,30 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
                 ))}
               </div>
               <button onClick={addSupplier} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Supplier</button>
+            </div>
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Bulk upload suppliers (Excel/CSV columns: Name, Items — items comma-separated, matched by name). Matches existing suppliers by name and replaces their linked items; new names are added.</div>
+              <FileUploadRow flash={flash} parser={parseMultiColFile} emptyMsg="No rows found — check the file has a Name column" onRows={(rows) => {
+                let added = 0, updated = 0, unmatchedItems = 0;
+                let suppliers = [...db.suppliers];
+                rows.forEach(r => {
+                  const name = String(r.Name || r.name || r.Supplier || "").trim();
+                  if (!name) return;
+                  const wantedNames = splitNameList(r.Items || r.items);
+                  const itemIds = [];
+                  wantedNames.forEach(n => {
+                    const item = db.items.find(i => i.name.toLowerCase() === n.toLowerCase());
+                    if (item) itemIds.push(item.id); else unmatchedItems++;
+                  });
+                  const idx = suppliers.findIndex(s => s.name.toLowerCase() === name.toLowerCase());
+                  if (idx >= 0) { suppliers[idx] = { ...suppliers[idx], itemIds }; updated++; }
+                  else { suppliers.push({ id: uid("s"), name, itemIds, openingBalance: 0 }); added++; }
+                });
+                const next = { ...db, suppliers };
+                addLog(next, "Admin", `Uploaded suppliers: ${added} added, ${updated} updated${unmatchedItems ? `, ${unmatchedItems} item name(s) not found` : ""}`);
+                persist(next);
+                flash(`${added} added, ${updated} updated${unmatchedItems ? `, ${unmatchedItems} item name(s) not found` : ""}`);
+              }} />
             </div>
             <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Upload opening balances (Excel/CSV: col A = supplier name, col B = amount owed)</div>
@@ -3360,6 +3527,32 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
                 ))}
               </div>
               <button onClick={addKitchen} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Kitchen</button>
+            </div>
+            <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Bulk set kitchen item restrictions (Excel/CSV columns: Kitchen, Branch, Items — items comma-separated, matched by name). Matches an existing kitchen by name + branch and replaces its allowed items; leave Items blank to allow all items.</div>
+              <FileUploadRow flash={flash} parser={parseMultiColFile} emptyMsg="No rows found — check the file has Kitchen and Branch columns" onRows={(rows) => {
+                let matched = 0, notFound = 0, unmatchedItems = 0;
+                const kitchens = (db.kitchens || []).map(k => ({ ...k }));
+                rows.forEach(r => {
+                  const kName = String(r.Kitchen || r.kitchen || "").trim();
+                  const kBranch = String(r.Branch || r.branch || "").trim();
+                  if (!kName || !kBranch) return;
+                  const k = kitchens.find(x => x.name.toLowerCase() === kName.toLowerCase() && x.branch.toLowerCase() === kBranch.toLowerCase());
+                  if (!k) { notFound++; return; }
+                  const wantedNames = splitNameList(r.Items || r.items);
+                  const itemIds = [];
+                  wantedNames.forEach(n => {
+                    const item = db.items.find(i => i.name.toLowerCase() === n.toLowerCase());
+                    if (item) itemIds.push(item.id); else unmatchedItems++;
+                  });
+                  k.itemIds = itemIds;
+                  matched++;
+                });
+                const next = { ...db, kitchens };
+                addLog(next, "Admin", `Uploaded kitchen item restrictions: ${matched} matched, ${notFound} kitchen(s) not found${unmatchedItems ? `, ${unmatchedItems} item name(s) not found` : ""}`);
+                persist(next);
+                flash(`${matched} kitchen(s) updated${notFound ? `, ${notFound} not found` : ""}${unmatchedItems ? `, ${unmatchedItems} item name(s) not found` : ""}`);
+              }} />
             </div>
             {BRANCHES.map(b => {
               const list = (db.kitchens || []).filter(k => k.branch === b);
