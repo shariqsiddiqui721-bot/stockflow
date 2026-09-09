@@ -2761,7 +2761,10 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
         })()}
         {tab === "POS vs Stock" && posSheetId && !posLoading && posSalesRows && (() => {
           const eff = dateFilter || todayStr();
-          const rows = [];
+          // Group by (branch, raw item) so an ingredient used by several dishes (e.g. Handi Boneless
+          // across 8 different Handi recipes) shows as ONE row with all contributing dishes listed,
+          // instead of one row per recipe.
+          const groups = {}; // key "branch|rawItemId" -> { branch, rawItem, posCalc, contributions:[], actual, diff }
           myBranches.forEach(branch => {
             (db.recipes || []).forEach(recipe => {
               if (recipe.branch && recipe.branch !== branch) return;
@@ -2775,51 +2778,68 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                   const rawItem = db.items.find(i => i.id === c.itemId);
                   if (!rawItem) return;
                   const posCalc = c.qty * batches;
-                  const ending = db.endings.find(e => e.branch === branch && e.itemId === c.itemId && e.date === eff && !e.kitchenId);
-                  const opening = openingOf(branch, c.itemId, eff);
-                  const received = db.issues.filter(x => x.itemId === c.itemId && x.to === branch && x.date === eff).reduce((a, x) => a + x.qty, 0);
-                  const actual = ending ? opening + received - ending.qty : null;
-                  const diff = actual === null ? null : posCalc - actual;
-                  rows.push({ branch, rawItem, soldItemName: item.name, soldQty, posCalc, actual, diff, recipe });
+                  const key = branch + "|" + c.itemId;
+                  if (!groups[key]) groups[key] = { branch, rawItem, posCalc: 0, contributions: [] };
+                  groups[key].posCalc += posCalc;
+                  groups[key].contributions.push({ soldItemName: item.name, soldQty, posCalc });
                 });
               });
             });
           });
+          const rows = Object.values(groups).map(g => {
+            const ending = db.endings.find(e => e.branch === g.branch && e.itemId === g.rawItem.id && e.date === eff && !e.kitchenId);
+            const opening = openingOf(g.branch, g.rawItem.id, eff);
+            const received = db.issues.filter(x => x.itemId === g.rawItem.id && x.to === g.branch && x.date === eff).reduce((a, x) => a + x.qty, 0);
+            const actual = ending ? opening + received - ending.qty : null;
+            const diff = actual === null ? null : g.posCalc - actual;
+            return { ...g, actual, diff };
+          }).sort((a, b) => a.rawItem.name.localeCompare(b.rawItem.name));
           const key = (r) => r.branch + "|" + r.rawItem.id;
           return (
             <ReportTable
               title={`POS vs StockFlow — ${eff}`}
-              onExport={() => downloadCSV("pos-vs-stock.csv", toCSV(rows, [
-                { label: "Branch", get: r => r.branch }, { label: "Raw Item", get: r => r.rawItem.name }, { label: "Sold Item", get: r => r.soldItemName },
-                { label: "Qty Sold", get: r => r.soldQty }, { label: "POS Calc Use", get: r => r.posCalc.toFixed(2) },
-                { label: "Actual Use", get: r => r.actual === null ? "no ending count" : r.actual }, { label: "Difference", get: r => r.diff === null ? "" : r.diff.toFixed(2) },
-              ]))}
+              onExport={() => downloadCSV("pos-vs-stock.csv", toCSV(
+                rows.flatMap(r => r.contributions.map(c => ({ branch: r.branch, rawItem: r.rawItem.name, soldItem: c.soldItemName, soldQty: c.soldQty, contribution: c.posCalc.toFixed(2), totalPosCalc: r.posCalc.toFixed(2), actual: r.actual === null ? "no ending count" : r.actual, diff: r.diff === null ? "" : r.diff.toFixed(2) }))),
+                [{ label: "Branch", get: r => r.branch }, { label: "Raw Item", get: r => r.rawItem }, { label: "Sold Item", get: r => r.soldItem },
+                 { label: "Qty Sold", get: r => r.soldQty }, { label: "Contribution", get: r => r.contribution }, { label: "Total POS Calc", get: r => r.totalPosCalc },
+                 { label: "Actual Use", get: r => r.actual }, { label: "Difference", get: r => r.diff }]
+              ))}
             >
               {rows.length === 0 && <div className="text-sm text-[#8A9690]">No recipe-matched sales for this date yet — set up Recipes in Admin for the items you want tracked (disposables, BBQ, rice, meats).</div>}
-              {rows.map((r, idx) => (
-                <div key={idx} className="py-2.5 border-t border-[#EFEBDF] first:border-t-0">
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-sm font-semibold">{r.rawItem.name} <span className="text-[#8A9690] font-normal">· {r.branch}</span></span>
-                    {r.diff !== null && (
-                      <span className={`text-xs font-bold ${r.diff >= 0 ? "text-[#2B6E63]" : "text-[#B33A3A]"}`}>{r.diff >= 0 ? "Surplus " : "Loss "}{money(Math.abs(r.diff))}</span>
+              {rows.map((r, idx) => {
+                const isOff = r.diff !== null && Math.abs(r.diff) > 0.01;
+                return (
+                  <div key={idx} className={`py-2.5 border-t border-[#EFEBDF] first:border-t-0 ${isOff ? "bg-[#FBEAEA] -mx-3.5 px-3.5" : ""}`}>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className={`text-sm font-semibold ${isOff ? "text-[#B33A3A]" : ""}`}>{r.rawItem.name} <span className="text-[#8A9690] font-normal">· {r.branch}</span></span>
+                      {r.diff !== null && (
+                        <span className={`text-xs font-bold ${r.diff >= 0 ? "text-[#2B6E63]" : "text-[#B33A3A]"}`}>{r.diff >= 0 ? "Surplus " : "Loss "}{money(Math.abs(r.diff))}</span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-[#5C6B62] mb-1">
+                      {r.contributions.map((c, i) => (
+                        <div key={i}>{c.soldQty} × {c.soldItemName} → {c.posCalc.toFixed(2)} {r.rawItem.unit}</div>
+                      ))}
+                    </div>
+                    <div className={`text-[11px] font-semibold ${isOff ? "text-[#B33A3A]" : "text-[#8A9690]"}`}>
+                      Recipe needs total: {r.posCalc.toFixed(2)} {r.rawItem.unit} · StockFlow actual: {r.actual === null ? "no ending count yet" : `${r.actual} ${r.rawItem.unit}`}
+                    </div>
+                    {r.diff !== null && r.diff < 0 && (
+                      lossReasonFor === key(r) ? (
+                        <div className="flex gap-2 mt-2">
+                          <input className={numCls + " font-sans"} placeholder="Reason for the extra usage" value={lossReasonText} onChange={e => setLossReasonText(e.target.value)} />
+                          <button onClick={() => saveLossReason(key(r), r.branch, r.rawItem.id)} className="bg-[#C98A2C] text-white px-3 rounded-xl font-semibold whitespace-nowrap">Save</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => { setLossReasonFor(key(r)); setLossReasonText(""); }} className="text-[10px] font-semibold text-[#B33A3A] bg-[#B33A3A]/10 px-2.5 py-1 rounded-full mt-1.5">Record Reason</button>
+                      )
                     )}
+                    {(db.posLossReasons || []).filter(l => l.branch === r.branch && l.itemId === r.rawItem.id && l.date === eff).map(l => (
+                      <div key={l.id} className="text-[11px] text-[#5C6B62] mt-1 italic">Noted: {l.reason}</div>
+                    ))}
                   </div>
-                  <div className="text-[11px] text-[#8A9690]">{r.soldQty} × {r.soldItemName} → recipe needs {r.posCalc.toFixed(2)} {r.rawItem.unit} · StockFlow actual: {r.actual === null ? "no ending count yet" : `${r.actual} ${r.rawItem.unit}`}</div>
-                  {r.diff !== null && r.diff < 0 && (
-                    lossReasonFor === key(r) ? (
-                      <div className="flex gap-2 mt-2">
-                        <input className={numCls + " font-sans"} placeholder="Reason for the extra usage" value={lossReasonText} onChange={e => setLossReasonText(e.target.value)} />
-                        <button onClick={() => saveLossReason(key(r), r.branch, r.rawItem.id)} className="bg-[#C98A2C] text-white px-3 rounded-xl font-semibold whitespace-nowrap">Save</button>
-                      </div>
-                    ) : (
-                      <button onClick={() => { setLossReasonFor(key(r)); setLossReasonText(""); }} className="text-[10px] font-semibold text-[#B33A3A] bg-[#B33A3A]/10 px-2.5 py-1 rounded-full mt-1.5">Record Reason</button>
-                    )
-                  )}
-                  {(db.posLossReasons || []).filter(l => l.branch === r.branch && l.itemId === r.rawItem.id && l.date === eff).map(l => (
-                    <div key={l.id} className="text-[11px] text-[#5C6B62] mt-1 italic">Noted: {l.reason}</div>
-                  ))}
-                </div>
-              ))}
+                );
+              })}
             </ReportTable>
           );
         })()}
