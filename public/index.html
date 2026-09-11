@@ -512,7 +512,15 @@ function App() {
   const stockOf = useMemo(() => (branch, itemId, asOfDate) => {
     if (!db) return 0;
     let qty = Number(db.openingStock?.[branch]?.[itemId] || 0);
-    if (branch === "Store") db.purchases.forEach(p => { if (p.itemId === itemId && (!asOfDate || p.date <= asOfDate)) qty += Number(p.qty); });
+    // Credit purchases always arrive at Store (billed centrally, distributed via Issue).
+    // Cash purchases belong directly to whichever branch they were made for — that branch owns
+    // that stock immediately, it does not pass through Store first.
+    db.purchases.forEach(p => {
+      if (p.itemId !== itemId) return;
+      if (asOfDate && p.date > asOfDate) return;
+      const pBranch = p.branch || "Store";
+      if (pBranch === branch) qty += Number(p.qty);
+    });
     db.issues.forEach(iss => {
       if (iss.itemId !== itemId) return;
       if (asOfDate && iss.date > asOfDate) return;
@@ -732,7 +740,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
   const [entryDate, setEntryDate] = useState(todayStr());
   const [supplierId, setSupplierId] = useState(db.suppliers[0]?.id || "");
   const [category, setCategory] = useState("");
-  const [cashBranch, setCashBranch] = useState(myBranches[0]);
+  const [purchaseBranch, setPurchaseBranch] = useState(myBranches.includes("Store") ? "Store" : myBranches[0]);
   const [rows, setRows] = useState({}); // itemId -> { qty, rate }
   const [payMode, setPayMode] = useState("credit");
   const [todayInputs, setTodayInputs] = useState({}); // category -> value
@@ -810,7 +818,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
     if (categoriesNeedingToday.length > 0) { flash("Set today's rate for: " + categoriesNeedingToday.join(", "), "error"); return; }
     const recs = entries.map(([itemId, r]) => {
       const qty = Number(r.qty), rate = Number(r.rate);
-      return { id: uid("p"), date: entryDate, itemId, supplierId, qty, rate, amount: qty * rate, paymentMode: payMode, branch: payMode === "cash" ? cashBranch : null, userId: session.id };
+      return { id: uid("p"), date: entryDate, itemId, supplierId, qty, rate, amount: qty * rate, paymentMode: payMode, branch: purchaseBranch, userId: session.id };
     });
     const next = { ...db, purchases: [...recs, ...db.purchases] };
     addLog(next, "Purchase", `${supplier.name}: ${recs.length} item(s), bill ${money(total)} (${payMode})`);
@@ -834,6 +842,11 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
             {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </Field>
+        <Field label="Branch (who owns this stock)">
+          <select className={selCls} value={purchaseBranch} onChange={e => setPurchaseBranch(e.target.value)}>
+            {myBranches.map(b => <option key={b}>{b}</option>)}
+          </select>
+        </Field>
 
         <Field label="Payment">
           <div className="grid grid-cols-2 gap-2">
@@ -850,19 +863,12 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
         </Field>
 
         {payMode === "cash" && (
-          <React.Fragment>
-            <Field label="Branch (for cash material)">
-              <select className={selCls} value={cashBranch} onChange={e => setCashBranch(e.target.value)}>
-                {myBranches.map(b => <option key={b}>{b}</option>)}
-              </select>
-            </Field>
-            <Field label="Category">
-              <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>
-                <option value="">Select a category…</option>
-                {cashCategories.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </Field>
-          </React.Fragment>
+          <Field label="Category">
+            <select className={selCls} value={category} onChange={e => setCategory(e.target.value)}>
+              <option value="">Select a category…</option>
+              {cashCategories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
         )}
 
         {formulaCategories.map(cat => {
@@ -2142,7 +2148,13 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
           const demandOf = (itemId) => kitchenId
             ? demandCycle(db, itemId, branch, kitchenId, demEff)[mode]
             : demandCycle(db, itemId, branch, null, demEff)[mode] + kitchensOf(db, branch).reduce((a, k) => a + demandCycle(db, itemId, branch, k.id, demEff)[mode], 0);
-          const receivedOf = (itemId) => db.issues.filter(x => x.itemId === itemId && x.date === eff && x.to === branch && (kitchenId ? x.kitchenId === kitchenId : true)).reduce((a, x) => a + x.qty, 0) + (!kitchenId && branch === "Store" ? db.purchases.filter(p => p.itemId === itemId && p.date === eff).reduce((a, p) => a + p.qty, 0) : 0);
+          const receivedOf = (itemId) => {
+            const fromIssues = db.issues.filter(x => x.itemId === itemId && x.date === eff && x.to === branch && (kitchenId ? x.kitchenId === kitchenId : true)).reduce((a, x) => a + x.qty, 0);
+            if (kitchenId) return fromIssues;
+            // Credit purchases land at Store; cash purchases land directly at whichever branch they were made for.
+            const fromPurchases = db.purchases.filter(p => p.itemId === itemId && p.date === eff && (p.branch || "Store") === branch).reduce((a, p) => a + p.qty, 0);
+            return fromIssues + fromPurchases;
+          };
           const endingOf = (itemId) => db.endings.find(x => x.itemId === itemId && x.date === eff && x.branch === branch && (kitchenId ? x.kitchenId === kitchenId : true));
 
           const rowsData = filteredItems.map(i => {
@@ -2190,7 +2202,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
         {tab === "Purchases" && (() => {
           // Credit purchases arrive at Store; only someone with Store access should see them.
           // Cash purchases are tagged with a branch directly.
-          const purchasesVisible = db.purchases.filter(p => (p.paymentMode === "cash" ? myBranches.includes(p.branch || "Store") : myBranches.includes("Store")));
+          const purchasesVisible = db.purchases.filter(p => myBranches.includes(p.branch || "Store"));
           return (
           <ReportTable title="Purchase History" onExport={() => downloadCSV("purchases.csv", toCSV(purchasesVisible, [{ label: "Date", get: p => p.date }, { label: "Item", get: p => itemName(p.itemId) }, { label: "Supplier", get: p => supplierName(p.supplierId) }, { label: "Qty", get: p => p.qty }, { label: "Rate", get: p => p.rate }, { label: "Amount", get: p => p.amount }, { label: "Payment", get: p => p.paymentMode || "credit" }]))}>
             {purchasesVisible.filter(p => itemName(p.itemId).toLowerCase().includes(q.toLowerCase()) && (!dateFilter || p.date === dateFilter)).slice(0, 200).map(p => (
@@ -3010,7 +3022,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
           const rows = Object.values(groups).map(g => {
             const ending = db.endings.find(e => e.branch === g.branch && e.itemId === g.rawItem.id && e.date === eff && !e.kitchenId);
             const opening = openingOf(g.branch, g.rawItem.id, eff);
-            const received = db.issues.filter(x => x.itemId === g.rawItem.id && x.to === g.branch && x.date === eff).reduce((a, x) => a + x.qty, 0);
+            const received = db.issues.filter(x => x.itemId === g.rawItem.id && x.to === g.branch && x.date === eff).reduce((a, x) => a + x.qty, 0)
+              + db.purchases.filter(p => p.itemId === g.rawItem.id && p.date === eff && (p.branch || "Store") === g.branch).reduce((a, p) => a + p.qty, 0);
             const actual = ending ? round2(opening + received - ending.qty) : null;
             const diff = actual === null ? null : g.posCalc - actual;
             return { ...g, actual, diff };
