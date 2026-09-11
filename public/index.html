@@ -36,6 +36,8 @@ const businessDateOf = (input) => {
 const todayStr = () => businessDateOf(new Date());
 const nowStr = () => new Date().toLocaleString();
 const money = (n) => "Rs " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+// Rounds away floating-point noise (0.1 + 0.2 style artifacts like 0.299999999999998) for display.
+const round2 = (n) => n === null || n === undefined || n === "" ? n : Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 // Demand runs on its own window: 9:00 PM through 6:00 PM the following calendar day.
 // e.g. "15 Aug demand" = everything entered from 14 Aug 9pm through 15 Aug 6pm.
@@ -127,6 +129,18 @@ async function apiGet() {
 }
 async function apiSave(data) {
   await fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+}
+// Merge-safe saves: the server reads the current row, applies just this change, and returns the
+// full updated state — safe even if someone else's phone has saved something else in the meantime.
+async function apiMergeAttendance(records) {
+  const r = await fetch("/api/labor/attendance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ records }) });
+  if (!r.ok) throw new Error("Failed to save attendance");
+  return (await r.json()).data;
+}
+async function apiMergePayment(rec) {
+  const r = await fetch("/api/labor/payment", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) });
+  if (!r.ok) throw new Error("Failed to save payment");
+  return (await r.json()).data;
 }
 
 function toCSV(rows, headers) {
@@ -469,6 +483,27 @@ function App() {
     try { await apiSave(next); } catch { /* best effort */ }
   }, []);
 
+  // These two save on the server via a targeted read-modify-write instead of overwriting the whole
+  // row, then adopt the server's returned state locally — safe against another phone's concurrent save.
+  const mergeAttendance = useCallback(async (records) => {
+    try {
+      const merged = await apiMergeAttendance(records);
+      setDb(merged);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+  const mergePayment = useCallback(async (rec) => {
+    try {
+      const merged = await apiMergePayment(rec);
+      setDb(merged);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
   const flash = (msg, kind = "ok") => { setToast({ msg, kind }); setTimeout(() => setToast(null), 2200); };
   const addLog = (dbNext, action, detail) => {
     dbNext.log = [{ id: uid("l"), at: nowStr(), date: todayStr(), user: session?.name || "-", action, detail }, ...dbNext.log].slice(0, 2000);
@@ -510,12 +545,12 @@ function App() {
   if (!db) return <div className="min-h-screen flex items-center justify-center text-[#1F2A24] font-semibold">Loading…</div>;
   if (!session) return <LoginScreen db={db} onLogin={(u) => { setSession(u); setScreen("menu"); }} />;
 
-  const commonProps = { db, session, persist, addLog, flash, stockOf, balanceOf, lastBillOf, setScreen };
+  const commonProps = { db, session, persist, mergeAttendance, mergePayment, addLog, flash, stockOf, balanceOf, lastBillOf, setScreen };
 
   return (
     <div className="min-h-screen bg-[#F4EFE4] pb-8">
       <Toast msg={toast?.msg} kind={toast?.kind} />
-      {screen === "menu" && <MainMenu db={db} session={session} persist={persist} onLogout={() => setSession(null)} setScreen={setScreen} />}
+      {screen === "menu" && <MainMenu {...commonProps} onLogout={() => setSession(null)} />}
       {screen === "purchase" && <PurchaseScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "issue" && <IssueScreen {...commonProps} onDone={() => setScreen("menu")} />}
       {screen === "ending" && <EndingScreen {...commonProps} onDone={() => setScreen("menu")} />}
@@ -576,7 +611,7 @@ function LoginScreen({ db, onLogin }) {
 
 /* ---------- Main Menu ---------- */
 
-function MainMenu({ db, session, persist, onLogout, setScreen }) {
+function MainMenu({ db, session, persist, addLog, flash, onLogout, setScreen }) {
   const perms = session.permissions || [];
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const pendingReceipts = (db.issues || []).filter(x => !x.confirmed && myBranches.includes(x.to)).length;
@@ -585,6 +620,22 @@ function MainMenu({ db, session, persist, onLogout, setScreen }) {
   const mismatches = (db.adjustments || []).filter(a => a.kind === "received-mismatch" && !a.acknowledged && (isAdmin || a.senderUserId === session.id));
   const itemName = (id) => db.items.find(i => i.id === id)?.name || id;
   const dismissMismatch = (id) => persist({ ...db, adjustments: db.adjustments.map(a => a.id === id ? { ...a, acknowledged: true } : a) });
+  const [correctingId, setCorrectingId] = useState(null);
+  const [correctQty, setCorrectQty] = useState("");
+  const correctMismatch = (m) => {
+    const newActual = Number(correctQty);
+    if (correctQty === "" || isNaN(newActual)) { flash && flash("Enter the corrected quantity", "error"); return; }
+    const newDiff = newActual - (m.issuedQty || 0);
+    const next = {
+      ...db,
+      adjustments: db.adjustments.map(a => a.id === m.id ? { ...a, qty: newDiff, receivedQty: newActual, acknowledged: true, reason: `Issued ${m.issuedQty}, corrected to ${newActual} (was reported ${m.receivedQty})` } : a),
+      issues: m.issueId ? db.issues.map(x => x.id === m.issueId ? { ...x, confirmedQty: newActual } : x) : db.issues,
+    };
+    if (addLog) addLog(next, "Mismatch Corrected", `${itemName(m.itemId)} at ${m.branch}: corrected to ${newActual} (issued ${m.issuedQty})`);
+    persist(next);
+    setCorrectingId(null); setCorrectQty("");
+    if (flash) flash("Corrected");
+  };
   const tiles = [
     { key: "purchase", label: "Purchase", sub: "Record stock in", emoji: "📦", color: "#C98A2C" },
     { key: "issue", label: "Issue", sub: "Move to branches", emoji: "🔀", color: "#2B6E63" },
@@ -605,12 +656,27 @@ function MainMenu({ db, session, persist, onLogout, setScreen }) {
         <div className="mx-4 mt-4 mb-1 bg-[#B33A3A] rounded-2xl p-4 shadow-lg border-2 border-[#7A2626] animate-pulse">
           <div className="text-white font-bold mb-2 flex items-center gap-2 text-base">🔴 Receiving Mismatch{mismatches.length > 1 ? "es" : ""}</div>
           {mismatches.map(m => (
-            <div key={m.id} className="flex justify-between items-start gap-2 py-1.5 border-t border-white/20 first:border-t-0">
-              <div className="text-white text-sm">
-                <div className="font-semibold">{itemName(m.itemId)} — {m.branch}</div>
-                <div className="text-white/80 text-xs">{m.qty > 0 ? "+" : ""}{m.qty} · {m.reason}</div>
+            <div key={m.id} className="py-1.5 border-t border-white/20 first:border-t-0">
+              <div className="flex justify-between items-start gap-2">
+                <div className="text-white text-sm">
+                  <div className="font-semibold">{itemName(m.itemId)} — {m.branch}</div>
+                  <div className="text-white/80 text-xs">{m.qty > 0 ? "+" : ""}{m.qty} · {m.reason}</div>
+                </div>
+                {correctingId !== m.id && (
+                  <div className="flex gap-1.5 shrink-0">
+                    <button onClick={() => { setCorrectingId(m.id); setCorrectQty(String(m.receivedQty ?? "")); }} className="text-[10px] font-semibold bg-white text-[#B33A3A] px-2.5 py-1 rounded-full whitespace-nowrap">Correct</button>
+                    <button onClick={() => dismissMismatch(m.id)} className="text-[10px] font-semibold bg-white/20 text-white px-2.5 py-1 rounded-full whitespace-nowrap">Dismiss</button>
+                  </div>
+                )}
               </div>
-              <button onClick={() => dismissMismatch(m.id)} className="text-[10px] font-semibold bg-white/20 text-white px-2.5 py-1 rounded-full whitespace-nowrap">Dismiss</button>
+              {correctingId === m.id && (
+                <div className="flex gap-2 mt-2">
+                  <input autoFocus className="flex-1 bg-white/90 rounded-lg px-2.5 py-1.5 text-sm font-mono" type="number" inputMode="decimal"
+                    placeholder="Actual correct qty" value={correctQty} onChange={e => setCorrectQty(e.target.value)} />
+                  <button onClick={() => correctMismatch(m)} className="text-xs font-semibold bg-white text-[#B33A3A] px-3 rounded-lg whitespace-nowrap">Save</button>
+                  <button onClick={() => setCorrectingId(null)} className="text-xs font-semibold bg-white/20 text-white px-3 rounded-lg whitespace-nowrap">✕</button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -1197,7 +1263,7 @@ function ConversionScreen({ db, session, persist, addLog, flash, stockOf, onDone
 
 /* ---------- Labor (attendance + daily wage) ---------- */
 
-function LaborScreen({ db, session, persist, addLog, flash, onDone }) {
+function LaborScreen({ db, session, persist, mergeAttendance, mergePayment, addLog, flash, onDone }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const [branch, setBranch] = useState(myBranches[0]);
   const [date, setDate] = useState(todayStr());
@@ -1211,6 +1277,8 @@ function LaborScreen({ db, session, persist, addLog, flash, onDone }) {
   const [newLaborNic, setNewLaborNic] = useState("");
   const [newLaborPhone, setNewLaborPhone] = useState("");
   const [newLaborWage, setNewLaborWage] = useState("");
+  const [savingAtt, setSavingAtt] = useState(false);
+  const [savingPay, setSavingPay] = useState(false);
 
   const addLaborHere = () => {
     if (!newLaborName.trim() || !newLaborWage || Number(newLaborWage) <= 0) { flash("Name and daily wage required", "error"); return; }
@@ -1228,31 +1296,29 @@ function LaborScreen({ db, session, persist, addLog, flash, onDone }) {
 
   const setStatus = (laborId, status) => setStatusDraft(d => ({ ...d, [laborId]: status }));
 
-  const saveAttendance = () => {
+  // Attendance is high-frequency and multi-device (several staff marking around the same time),
+  // so this goes through the server's merge-safe endpoint instead of a full-state persist — that
+  // avoids one phone's save silently overwriting another's just-added record.
+  const saveAttendance = async () => {
     const toSave = Object.entries(statusDraft).filter(([, v]) => v);
     if (toSave.length === 0) { flash("Mark at least one person's attendance", "error"); return; }
-    let next = { ...db };
-    toSave.forEach(([laborId, status]) => {
-      const existingIdx = (next.attendance || []).findIndex(a => a.laborId === laborId && a.date === date);
-      const rec = { id: existingIdx >= 0 ? next.attendance[existingIdx].id : uid("att"), date, laborId, branch, status, userId: session.id };
-      if (existingIdx >= 0) {
-        next.attendance = next.attendance.map((a, i) => i === existingIdx ? rec : a);
-      } else {
-        next.attendance = [rec, ...(next.attendance || [])];
-      }
-    });
-    addLog(next, "Attendance", `${branch} ${date}: ${toSave.length} marked`);
-    persist(next); flash("Attendance saved"); setStatusDraft({});
+    const records = toSave.map(([laborId, status]) => ({ date, laborId, branch, status, userId: session.id, userName: session.name }));
+    setSavingAtt(true);
+    const ok = await mergeAttendance(records);
+    setSavingAtt(false);
+    if (!ok) { flash("Couldn't save — check your connection and try again", "error"); return; }
+    flash("Attendance saved"); setStatusDraft({});
   };
 
-  const savePayment = (laborId) => {
+  const savePayment = async (laborId) => {
     const amt = Number(payAmount);
     if (!amt || amt <= 0) { flash("Enter a valid amount", "error"); return; }
-    const rec = { id: uid("lpay"), date, laborId, amount: amt, note: payNote.trim(), userId: session.id };
-    const next = { ...db, laborPayments: [rec, ...(db.laborPayments || [])] };
     const labor = (db.labors || []).find(l => l.id === laborId);
-    addLog(next, "Labor Payment", `Paid ${money(amt)} to ${labor?.name}`);
-    persist(next); setPayOpenFor(null); setPayAmount(""); setPayNote(""); flash("Payment saved");
+    setSavingPay(true);
+    const ok = await mergePayment({ date, laborId, amount: amt, note: payNote.trim(), userId: session.id, userName: session.name });
+    setSavingPay(false);
+    if (!ok) { flash("Couldn't save — check your connection and try again", "error"); return; }
+    setPayOpenFor(null); setPayAmount(""); setPayNote(""); flash("Payment saved");
   };
 
   return (
@@ -1303,7 +1369,7 @@ function LaborScreen({ db, session, persist, addLog, flash, onDone }) {
                 <div className="flex gap-2 mt-1">
                   <input className={numCls} type="number" placeholder="Amount" value={payAmount} onChange={e => setPayAmount(e.target.value)} />
                   <input className={numCls + " font-sans"} placeholder="Note" value={payNote} onChange={e => setPayNote(e.target.value)} />
-                  <button onClick={() => savePayment(l.id)} className="bg-[#C98A2C] text-white px-3 rounded-xl font-semibold whitespace-nowrap">Save</button>
+                  <button onClick={() => savePayment(l.id)} disabled={savingPay} className="bg-[#C98A2C] text-white px-3 rounded-xl font-semibold whitespace-nowrap disabled:opacity-50">{savingPay ? "..." : "Save"}</button>
                   <button onClick={() => setPayOpenFor(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-3 rounded-xl font-semibold">✕</button>
                 </div>
               )}
@@ -1311,7 +1377,7 @@ function LaborScreen({ db, session, persist, addLog, flash, onDone }) {
           );
         })}
 
-        {laborsHere.length > 0 && <button className={btnPrimary} onClick={saveAttendance}>Save Attendance</button>}
+        {laborsHere.length > 0 && <button className={btnPrimary} disabled={savingAtt} onClick={saveAttendance}>{savingAtt ? "Saving..." : "Save Attendance"}</button>}
       </div>
     </div>
   );
@@ -1824,14 +1890,16 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
 
   // Opening balance for an item at a branch: the previous day's actual recorded Ending count
   // (physical ground truth) if one was taken; otherwise falls back to the running purchases/issues/adjustments total.
+  // Opening for a day is strictly last night's counted Ending — not a theoretical running total.
+  // If nobody counted an ending the day before, opening starts at 0 and stays 0 until stock actually
+  // arrives (purchase/received). Trusting counted reality over an unverified calculation.
   const openingOf = (branch, itemId, date) => {
     if (!date) return 0;
     const d = new Date(date + "T00:00:00");
     d.setDate(d.getDate() - 1);
     const prevDay = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
     const prevEnding = db.endings.find(e => e.branch === branch && e.itemId === itemId && e.date === prevDay && !e.kitchenId);
-    if (prevEnding) return prevEnding.qty;
-    return stockOf(branch, itemId, prevDay);
+    return prevEnding ? prevEnding.qty : 0;
   };
 
   // ---- Live Google Sheet (DesiFlow POS) reports ----
@@ -1847,6 +1915,56 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   const [laborExpanded, setLaborExpanded] = useState({}); // "laborId-absent"|"laborId-paid"|"laborId-due" -> bool
   const [ownerLedgerExpanded, setOwnerLedgerExpanded] = useState({});
   const [lossReasonText, setLossReasonText] = useState("");
+  const isAdminHere = (session.permissions || []).includes("admin");
+  const [editAdjId, setEditAdjId] = useState(null);
+  const [editAdjDraft, setEditAdjDraft] = useState({});
+  const startEditAdj = (a) => { setEditAdjId(a.id); setEditAdjDraft({ qty: String(a.qty), reason: a.reason || "" }); };
+  const saveEditAdj = () => {
+    const next = { ...db, adjustments: db.adjustments.map(a => a.id === editAdjId ? { ...a, qty: Number(editAdjDraft.qty) || 0, reason: editAdjDraft.reason } : a) };
+    addLog(next, "Admin", `Edited adjustment ${editAdjId}`);
+    persist(next); setEditAdjId(null); flash("Adjustment updated");
+  };
+  const deleteAdj = (id) => {
+    const next = { ...db, adjustments: db.adjustments.filter(a => a.id !== id) };
+    addLog(next, "Admin", `Deleted adjustment ${id}`);
+    persist(next); flash("Adjustment deleted");
+  };
+  const [editEndingKey, setEditEndingKey] = useState(null); // itemId|branch
+  const [editEndingQty, setEditEndingQty] = useState("");
+  const saveEditEnding = (rec) => {
+    const next = { ...db, endings: db.endings.map(e => e.id === rec.id ? { ...e, qty: Number(editEndingQty) || 0 } : e) };
+    addLog(next, "Admin", `Edited ending for ${itemName(rec.itemId)} at ${rec.branch}`);
+    persist(next); setEditEndingKey(null); flash("Ending updated");
+  };
+  const deleteEnding = (rec) => {
+    const next = { ...db, endings: db.endings.filter(e => e.id !== rec.id) };
+    addLog(next, "Admin", `Deleted ending for ${itemName(rec.itemId)} at ${rec.branch}`);
+    persist(next); flash("Ending deleted");
+  };
+  const [editAttId, setEditAttId] = useState(null);
+  const [editAttStatus, setEditAttStatus] = useState("");
+  const saveEditAtt = (id) => {
+    const next = { ...db, attendance: db.attendance.map(a => a.id === id ? { ...a, status: editAttStatus } : a) };
+    addLog(next, "Admin", `Edited attendance ${id} to ${editAttStatus}`);
+    persist(next); setEditAttId(null); flash("Attendance updated");
+  };
+  const deleteAtt = (id) => {
+    const next = { ...db, attendance: db.attendance.filter(a => a.id !== id) };
+    addLog(next, "Admin", `Deleted attendance record ${id}`);
+    persist(next); flash("Attendance record deleted");
+  };
+  const [editPayId, setEditPayId] = useState(null);
+  const [editPayAmt, setEditPayAmt] = useState("");
+  const saveEditPay = (id) => {
+    const next = { ...db, laborPayments: db.laborPayments.map(p => p.id === id ? { ...p, amount: Number(editPayAmt) || 0 } : p) };
+    addLog(next, "Admin", `Edited labor payment ${id}`);
+    persist(next); setEditPayId(null); flash("Payment updated");
+  };
+  const deletePay = (id) => {
+    const next = { ...db, laborPayments: db.laborPayments.filter(p => p.id !== id) };
+    addLog(next, "Admin", `Deleted labor payment ${id}`);
+    persist(next); flash("Payment deleted");
+  };
 
   const loadPosSales = async (force) => {
     if (!posSheetId) { setPosError("No Google Sheet link saved yet — add one in Admin → POS."); return; }
@@ -1910,6 +2028,18 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
       parseSoldItemsText(r.Items).forEach(({ name, qty }) => { totals[name] = (totals[name] || 0) + qty; });
     });
     return totals;
+  }, [posSalesFiltered.length, dateFilter]);
+  // Same as above but split per branch — needed anywhere a branch's own sales must be compared
+  // against that branch's own stock (using the combined total for every branch was the bug where
+  // every branch showed the identical sold-qty figure).
+  const posItemQtySoldByBranch = useMemo(() => {
+    const byBranch = {};
+    posSalesFiltered.forEach(r => {
+      const sfBranch = mapPosBranch(r.Branch);
+      if (!byBranch[sfBranch]) byBranch[sfBranch] = {};
+      parseSoldItemsText(r.Items).forEach(({ name, qty }) => { byBranch[sfBranch][name] = (byBranch[sfBranch][name] || 0) + qty; });
+    });
+    return byBranch;
   }, [posSalesFiltered.length, dateFilter]);
 
   // Maps a raw POS "Payment Method" value to one of our 4 owner-ledger modes.
@@ -2012,8 +2142,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             const received = receivedOf(i.id);
             const e = endingOf(i.id);
             const opening = kitchenId ? null : openingOf(branch, i.id, eff);
-            const used = e ? (opening || 0) + received - e.qty : null;
-            return { item: i, demand, received, ending: e ? e.qty : null, used };
+            const used = e ? round2((opening || 0) + received - e.qty) : null;
+            return { item: i, demand: round2(demand), received: round2(received), ending: e ? round2(e.qty) : null, used };
           }).filter(r => r.demand !== 0 || r.received !== 0 || r.ending !== null);
 
           return (
@@ -2412,7 +2542,28 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                   return (
                     <tr key={i.id} className="border-t border-[#EFEBDF]">
                       <td className="py-2 font-medium">{i.name}</td>
-                      {rows.map((e, idx) => <td key={idx} className="text-right py-2 font-mono">{e ? e.qty : "–"}</td>)}
+                      {rows.map((e, idx) => {
+                        const cellKey = e ? e.id : null;
+                        if (!e) return <td key={idx} className="text-right py-2 font-mono">–</td>;
+                        if (isAdminHere && editEndingKey === cellKey) {
+                          return (
+                            <td key={idx} className="text-right py-1">
+                              <div className="flex items-center gap-1 justify-end">
+                                <input className="w-16 border rounded px-1 py-0.5 text-right font-mono text-xs" type="number" value={editEndingQty} onChange={ev => setEditEndingQty(ev.target.value)} />
+                                <button onClick={() => saveEditEnding(e)} className="text-[#2B6E63] text-xs font-bold">✓</button>
+                                <button onClick={() => deleteEnding(e)} className="text-[#B33A3A] text-xs font-bold">✕</button>
+                              </div>
+                            </td>
+                          );
+                        }
+                        return (
+                          <td key={idx} className="text-right py-2 font-mono">
+                            {isAdminHere ? (
+                              <button onClick={() => { setEditEndingKey(cellKey); setEditEndingQty(String(e.qty)); }} className="underline decoration-dotted">{e.qty}</button>
+                            ) : e.qty}
+                          </td>
+                        );
+                      })}
                     </tr>
                   );
                 })}
@@ -2430,13 +2581,31 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             ]))}
           >
             {(db.adjustments || []).filter(a => myBranches.includes(a.branch) && (!dateFilter || a.date === dateFilter) && itemName(a.itemId).toLowerCase().includes(q.toLowerCase())).slice(0, 200).map(a => (
-              <div key={a.id} className="flex justify-between items-center py-2 border-t border-[#EFEBDF] first:border-t-0">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium truncate">{itemName(a.itemId)}</div>
-                  <div className="text-[11px] text-[#8A9690] capitalize">{a.branch} · {a.date} · {a.kind}{a.reason ? " — " + a.reason : ""}</div>
+              editAdjId === a.id ? (
+                <div key={a.id} className="py-2.5 border-t border-[#EFEBDF] first:border-t-0">
+                  <div className="text-sm font-medium mb-1.5">{itemName(a.itemId)} · {a.branch} · {a.date}</div>
+                  <div className="flex gap-2 mb-1.5">
+                    <input className={numCls} type="number" value={editAdjDraft.qty} onChange={e => setEditAdjDraft(d => ({ ...d, qty: e.target.value }))} placeholder="Qty" />
+                    <input className={numCls + " font-sans"} value={editAdjDraft.reason} onChange={e => setEditAdjDraft(d => ({ ...d, reason: e.target.value }))} placeholder="Reason" />
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={saveEditAdj} className="bg-[#2B6E63] text-white px-3 py-1.5 rounded-lg text-xs font-semibold">Save</button>
+                    <button onClick={() => setEditAdjId(null)} className="bg-[#F7F5F0] text-[#5C6B62] px-3 py-1.5 rounded-lg text-xs font-semibold">Cancel</button>
+                    <button onClick={() => deleteAdj(a.id)} className="text-[#B33A3A] text-xs font-semibold ml-auto">Delete</button>
+                  </div>
                 </div>
-                <div className={`font-mono font-bold text-sm ${a.qty < 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{a.qty > 0 ? "+" : ""}{a.qty}</div>
-              </div>
+              ) : (
+                <div key={a.id} className="flex justify-between items-center py-2 border-t border-[#EFEBDF] first:border-t-0">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium truncate">{itemName(a.itemId)}</div>
+                    <div className="text-[11px] text-[#8A9690] capitalize">{a.branch} · {a.date} · {a.kind}{a.reason ? " — " + a.reason : ""}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className={`font-mono font-bold text-sm ${a.qty < 0 ? "text-[#B33A3A]" : "text-[#2B6E63]"}`}>{a.qty > 0 ? "+" : ""}{a.qty}</div>
+                    {isAdminHere && <button onClick={() => startEditAdj(a)} className="text-[#5C6B62] text-xs">✎</button>}
+                  </div>
+                </div>
+              )
             ))}
             {(db.adjustments || []).filter(a => myBranches.includes(a.branch) && (!dateFilter || a.date === dateFilter)).length === 0 && <div className="text-sm text-[#8A9690]">No adjustments{dateFilter ? " on this date" : ""}.</div>}
           </ReportTable>
@@ -2448,7 +2617,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             const att = allAtt.filter(a => !dateFilter || a.date === dateFilter);
             const present = att.filter(a => a.status === "present").length;
             const late = att.filter(a => a.status === "late").length;
-            const absentDates = att.filter(a => a.status === "absent").map(a => a.date).sort();
+            const absentRecs = att.filter(a => a.status === "absent").sort((a, b) => a.date < b.date ? -1 : 1);
             const accrued = (present + late) * l.dailyWage;
             const payments = (db.laborPayments || []).filter(p => p.laborId === l.id && (!dateFilter || p.date === dateFilter)).sort((a, b) => a.date < b.date ? -1 : 1);
             const paid = payments.reduce((a, p) => a + p.amount, 0);
@@ -2462,13 +2631,13 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             const remainingAfterOpening = totalPaidAllTime - Number(l.openingDue || 0);
             const settledCount = l.dailyWage > 0 && remainingAfterOpening > 0 ? Math.floor(remainingAfterOpening / l.dailyWage) : 0;
             const dueDates = workedDates.slice(Math.max(0, settledCount)).filter(d => !dateFilter || d <= dateFilter);
-            return { labor: l, present, late, absentDates, accrued, paid, payments, opening, due, dueDates };
+            return { labor: l, present, late, absentRecs, accrued, paid, payments, opening, due, dueDates };
           });
           return (
             <ReportTable
               title={dateFilter ? `Labor — ${dateFilter}` : "Labor — All Time"}
               onExport={() => downloadCSV("labor.csv", toCSV(rows, [
-                { label: "Name", get: r => r.labor.name }, { label: "Present", get: r => r.present }, { label: "Late", get: r => r.late }, { label: "Absent", get: r => r.absentDates.length },
+                { label: "Name", get: r => r.labor.name }, { label: "Present", get: r => r.present }, { label: "Late", get: r => r.late }, { label: "Absent", get: r => r.absentRecs.length },
                 { label: "Accrued", get: r => r.accrued }, { label: "Paid", get: r => r.paid }, { label: "Due", get: r => r.due },
               ]))}
             >
@@ -2482,7 +2651,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                     </div>
                     <div className="text-[11px] text-[#8A9690] flex flex-wrap gap-x-1 items-center">
                       <span>Present {r.present} · Late {r.late} ·</span>
-                      <button onClick={() => setLaborExpanded(p => ({ ...p, [key + "-absent"]: !p[key + "-absent"] }))} className="text-[#B33A3A] font-semibold underline">Absent {r.absentDates.length}</button>
+                      <button onClick={() => setLaborExpanded(p => ({ ...p, [key + "-absent"]: !p[key + "-absent"] }))} className="text-[#B33A3A] font-semibold underline">Absent {r.absentRecs.length}</button>
                       <span>· Accrued {money(r.accrued)}{r.opening ? ` · Opening ${money(r.opening)}` : ""} ·</span>
                       <button onClick={() => setLaborExpanded(p => ({ ...p, [key + "-paid"]: !p[key + "-paid"] }))} className="text-[#2B6E63] font-semibold underline">Paid {money(r.paid)}</button>
                       {r.due > 0 && (
@@ -2494,13 +2663,57 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                     </div>
                     {laborExpanded[key + "-absent"] && (
                       <div className="mt-1.5 bg-[#FBEAEA] rounded-lg p-2 text-[11px] text-[#8A5050]">
-                        {r.absentDates.length === 0 ? "No absences in range." : r.absentDates.join(", ")}
+                        {r.absentRecs.length === 0 ? "No absences in range." : r.absentRecs.map(a => (
+                          <div key={a.id} className="flex justify-between items-center py-0.5">
+                            {editAttId === a.id ? (
+                              <React.Fragment>
+                                <select className="border rounded px-1 py-0.5 text-[11px]" value={editAttStatus} onChange={e => setEditAttStatus(e.target.value)}>
+                                  <option value="present">present</option><option value="late">late</option><option value="absent">absent</option>
+                                </select>
+                                <div className="flex gap-1.5">
+                                  <button onClick={() => saveEditAtt(a.id)} className="text-[#2B6E63] font-bold">✓</button>
+                                  <button onClick={() => setEditAttId(null)} className="text-[#8A9690] font-bold">✕</button>
+                                </div>
+                              </React.Fragment>
+                            ) : (
+                              <React.Fragment>
+                                <span>{a.date}</span>
+                                {isAdminHere && (
+                                  <div className="flex gap-2">
+                                    <button onClick={() => { setEditAttId(a.id); setEditAttStatus(a.status); }} className="text-[#4A6FA5] font-semibold">edit</button>
+                                    <button onClick={() => deleteAtt(a.id)} className="text-[#B33A3A] font-semibold">delete</button>
+                                  </div>
+                                )}
+                              </React.Fragment>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     )}
                     {laborExpanded[key + "-paid"] && (
                       <div className="mt-1.5 bg-[#EAF3F0] rounded-lg p-2 text-[11px] text-[#2B6E63]">
-                        {r.payments.length === 0 ? "No payments in range." : r.payments.map((p, idx) => (
-                          <div key={idx}>{p.date} — {money(p.amount)}{p.note ? " (" + p.note + ")" : ""}</div>
+                        {r.payments.length === 0 ? "No payments in range." : r.payments.map(p => (
+                          <div key={p.id} className="flex justify-between items-center py-0.5">
+                            {editPayId === p.id ? (
+                              <React.Fragment>
+                                <input className="w-20 border rounded px-1 py-0.5 text-right font-mono text-[11px]" type="number" value={editPayAmt} onChange={e => setEditPayAmt(e.target.value)} />
+                                <div className="flex gap-1.5">
+                                  <button onClick={() => saveEditPay(p.id)} className="text-[#2B6E63] font-bold">✓</button>
+                                  <button onClick={() => setEditPayId(null)} className="text-[#8A9690] font-bold">✕</button>
+                                </div>
+                              </React.Fragment>
+                            ) : (
+                              <React.Fragment>
+                                <span>{p.date} — {money(p.amount)}{p.note ? " (" + p.note + ")" : ""}</span>
+                                {isAdminHere && (
+                                  <div className="flex gap-2">
+                                    <button onClick={() => { setEditPayId(p.id); setEditPayAmt(String(p.amount)); }} className="text-[#4A6FA5] font-semibold">edit</button>
+                                    <button onClick={() => deletePay(p.id)} className="text-[#B33A3A] font-semibold">delete</button>
+                                  </div>
+                                )}
+                              </React.Fragment>
+                            )}
+                          </div>
                         ))}
                       </div>
                     )}
@@ -2771,7 +2984,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
               recipe.produces.forEach(p => {
                 const item = db.items.find(i => i.id === p.itemId);
                 if (!item) return;
-                const soldQty = posItemQtySold[item.name] || Object.entries(posItemQtySold).find(([n]) => n.toLowerCase() === item.name.toLowerCase())?.[1] || 0;
+                const soldQty = (posItemQtySoldByBranch[branch] && (posItemQtySoldByBranch[branch][item.name] || Object.entries(posItemQtySoldByBranch[branch]).find(([n]) => n.toLowerCase() === item.name.toLowerCase())?.[1])) || 0;
                 if (soldQty === 0) return;
                 const batches = soldQty / (p.qty || 1);
                 recipe.consumes.forEach(c => {
@@ -2790,7 +3003,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             const ending = db.endings.find(e => e.branch === g.branch && e.itemId === g.rawItem.id && e.date === eff && !e.kitchenId);
             const opening = openingOf(g.branch, g.rawItem.id, eff);
             const received = db.issues.filter(x => x.itemId === g.rawItem.id && x.to === g.branch && x.date === eff).reduce((a, x) => a + x.qty, 0);
-            const actual = ending ? opening + received - ending.qty : null;
+            const actual = ending ? round2(opening + received - ending.qty) : null;
             const diff = actual === null ? null : g.posCalc - actual;
             return { ...g, actual, diff };
           }).sort((a, b) => a.rawItem.name.localeCompare(b.rawItem.name));
@@ -3255,6 +3468,13 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
     persist(next); flash("New API key generated");
   };
 
+  const generateBackupApiKey = () => {
+    const key = "bk_" + Array.from({ length: 32 }, () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]).join("");
+    const next = { ...db, backupApiKey: key };
+    addLog(next, "Admin", "Generated new Backup API key");
+    persist(next); flash("New backup key generated");
+  };
+
   const uploadPosSales = (rows) => {
     const saleRecs = [];
     const adjRecs = [];
@@ -3316,7 +3536,7 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
     <div>
       <TopBar title="Admin" onBack={onBack} />
       <div className="px-4 pt-3 flex gap-2 overflow-x-auto">
-        {["Items", "Suppliers", "Rates", "Opening Stock", "Kitchens", "Recipes", "Labor", "POS", "Owners", "Users", "Reset"].map(t => (
+        {["Items", "Suppliers", "Rates", "Opening Stock", "Kitchens", "Recipes", "Labor", "POS", "Owners", "Backup", "Users", "Reset"].map(t => (
           <button key={t} onClick={() => setTab(t)} className={`flex-1 whitespace-nowrap py-2.5 px-3 rounded-xl text-sm font-semibold border-2 ${tab === t ? "bg-[#1F2A24] text-white border-[#1F2A24]" : "bg-white text-[#5C6B62] border-[#EAE4D4]"}`}>{t}</button>
         ))}
       </div>
@@ -3893,6 +4113,56 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
                 </div>
               ))}
             </div>
+          </React.Fragment>
+        )}
+        {tab === "Backup" && (
+          <React.Fragment>
+            <div className="bg-white rounded-xl p-3.5 border border-[#EAE4D4] mb-4">
+              <div className="font-bold text-[#1F2A24] mb-2">Daily backup to your Google Drive</div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Endpoint</div>
+              <div className="bg-[#F7F5F0] rounded-lg p-2.5 text-xs font-mono break-all mb-3">{typeof window !== "undefined" ? window.location.origin : ""}/api/backup</div>
+              <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Backup Key</div>
+              {db.backupApiKey ? (
+                <div className="bg-[#F7F5F0] rounded-lg p-2.5 text-xs font-mono break-all mb-3">{db.backupApiKey}</div>
+              ) : (
+                <div className="text-sm text-[#8A9690] mb-3">No key generated yet.</div>
+              )}
+              <button onClick={generateBackupApiKey} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">{db.backupApiKey ? "Regenerate" : "Generate"} Backup Key</button>
+              <div className="text-[11px] text-[#8A9690] mt-3">Regenerating breaks the old key — you'd need to update the script below with the new one.</div>
+            </div>
+            {db.backupApiKey && (
+              <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
+                <div className="font-bold text-[#1F2A24] mb-2">Set it up (once, ~5 minutes)</div>
+                <ol className="text-xs text-[#5C6B62] list-decimal pl-4 space-y-1 mb-3">
+                  <li>Go to <span className="font-semibold">script.google.com</span> (your own Google account) → New project</li>
+                  <li>Delete the default code, paste the script below instead</li>
+                  <li>Click <span className="font-semibold">Run</span> once — it'll ask you to authorize access to your Google Drive; allow it</li>
+                  <li>Click the clock icon (Triggers) on the left → <span className="font-semibold">+ Add Trigger</span> → choose the function, "Time-driven", "Day timer", pick a time → Save</li>
+                  <li>That's it — every day it saves a dated JSON snapshot into a "StockFlow Backups" folder in your Drive, and keeps the last 60 days automatically</li>
+                </ol>
+                <div className="bg-[#1F2A24] rounded-lg p-3 text-[10px] text-[#D8E8E0] font-mono overflow-x-auto whitespace-pre">{`function backupStockFlow() {
+  var url = "${typeof window !== "undefined" ? window.location.origin : ""}/api/backup?key=${db.backupApiKey}";
+  var res = UrlFetchApp.fetch(url);
+  var json = res.getContentText();
+
+  var folders = DriveApp.getFoldersByName("StockFlow Backups");
+  var folder = folders.hasNext() ? folders.next() : DriveApp.createFolder("StockFlow Backups");
+
+  var stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd_HH-mm");
+  folder.createFile("stockflow-backup-" + stamp + ".json", json, MimeType.PLAIN_TEXT);
+
+  // Keep only the last 60 days of backups
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 60);
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var f = files.next();
+    if (f.getDateCreated() < cutoff) f.setTrashed(true);
+  }
+}`}</div>
+              </div>
+            )}
+            <div className="text-[11px] text-[#8A9690]">If the app or database ever fails, every one of these saved files is a complete snapshot — every item, transaction, user, and setting — that can be restored the same way we imported your data before.</div>
           </React.Fragment>
         )}
         {tab === "Users" && (
