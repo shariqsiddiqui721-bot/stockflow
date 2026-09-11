@@ -206,6 +206,7 @@ const SEED = {
   customerReviews: [],
   posSales: [],
   posApiKey: null,
+  backupApiKey: null,
   posSheetLink: null,
   owners: [
     { id: "own1", name: "Shariq" },
@@ -260,7 +261,8 @@ app.get("/api/state", async (req, res) => {
   }
 });
 
-// Save the whole app state (simple last-write-wins, fine for small teams)
+// Save the whole app state (simple last-write-wins, fine for small teams — but risky for
+// high-frequency multi-user writes like attendance/payments; those use the merge endpoints below).
 app.post("/api/state", async (req, res) => {
   try {
     await pool.query(
@@ -271,6 +273,49 @@ app.post("/api/state", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to save data" });
+  }
+});
+
+// Merge-safe attendance save: reads the current row, upserts just these records, writes back.
+// Two phones marking attendance at the same moment can no longer wipe each other out.
+app.post("/api/labor/attendance", async (req, res) => {
+  try {
+    const records = req.body.records;
+    if (!Array.isArray(records) || records.length === 0) return res.status(400).json({ error: "records required" });
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    data.attendance = data.attendance || [];
+    records.forEach(rec => {
+      const idx = data.attendance.findIndex(a => a.laborId === rec.laborId && a.date === rec.date);
+      const full = { id: idx >= 0 ? data.attendance[idx].id : "att" + Math.random().toString(36).slice(2, 11), ...rec };
+      if (idx >= 0) data.attendance[idx] = full; else data.attendance.unshift(full);
+    });
+    data.log = [{ id: "l" + Math.random().toString(36).slice(2, 11), at: new Date().toLocaleString(), date: records[0].date, user: records[0].userName || "-", action: "Attendance", detail: `${records[0].branch} ${records[0].date}: ${records.length} marked` }, ...(data.log || [])].slice(0, 2000);
+    await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true, data });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to save attendance" });
+  }
+});
+
+// Merge-safe payment save: appends one payment without touching anything else in the row.
+app.post("/api/labor/payment", async (req, res) => {
+  try {
+    const rec = req.body;
+    if (!rec || !rec.laborId || !rec.amount) return res.status(400).json({ error: "laborId and amount required" });
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    data.laborPayments = data.laborPayments || [];
+    const full = { id: "lpay" + Math.random().toString(36).slice(2, 11), ...rec };
+    data.laborPayments.unshift(full);
+    const laborName = (data.labors || []).find(l => l.id === rec.laborId)?.name || "";
+    data.log = [{ id: "l" + Math.random().toString(36).slice(2, 11), at: new Date().toLocaleString(), date: rec.date, user: rec.userName || "-", action: "Labor Payment", detail: `Paid ${rec.amount} to ${laborName}` }, ...(data.log || [])].slice(0, 2000);
+    await pool.query("UPDATE app_state SET data = $1, updated_at = now() WHERE id = 1", [data]);
+    res.json({ ok: true, data });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to save payment" });
   }
 });
 
@@ -397,6 +442,21 @@ app.post("/api/pos/sales", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to record POS sales" });
+  }
+});
+
+// Full read-only export of the app's data, for an external daily backup job (e.g. a Google Apps
+// Script the user runs on their own account) to pull and save into their own Google Drive.
+app.get("/api/backup", async (req, res) => {
+  try {
+    const key = req.query.key;
+    const { rows } = await pool.query("SELECT data FROM app_state WHERE id = 1");
+    const data = rows[0].data;
+    if (!data.backupApiKey || key !== data.backupApiKey) return res.status(401).json({ error: "Invalid backup key" });
+    res.json(data);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to export backup" });
   }
 });
 
