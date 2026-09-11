@@ -1889,17 +1889,25 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
   };
 
   // Opening balance for an item at a branch: the previous day's actual recorded Ending count
-  // (physical ground truth) if one was taken; otherwise falls back to the running purchases/issues/adjustments total.
-  // Opening for a day is strictly last night's counted Ending — not a theoretical running total.
-  // If nobody counted an ending the day before, opening starts at 0 and stays 0 until stock actually
-  // arrives (purchase/received). Trusting counted reality over an unverified calculation.
+  // Opening for a day is last night's counted Ending — the physical ground truth — not a theoretical
+  // running total. If nobody counted an ending the day before AND this item/branch has some tracked
+  // history already, opening is 0 (a real gap in daily counting, treated honestly as unknown/zero).
+  // But if this item/branch has NO history at all yet (true day one), there's nothing to be "honest"
+  // about zeroing — fall back to the admin's manually-set Opening Stock baseline instead.
   const openingOf = (branch, itemId, date) => {
     if (!date) return 0;
     const d = new Date(date + "T00:00:00");
     d.setDate(d.getDate() - 1);
     const prevDay = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
     const prevEnding = db.endings.find(e => e.branch === branch && e.itemId === itemId && e.date === prevDay && !e.kitchenId);
-    return prevEnding ? prevEnding.qty : 0;
+    if (prevEnding) return prevEnding.qty;
+    const hasPriorHistory =
+      db.endings.some(e => e.branch === branch && e.itemId === itemId && e.date < date) ||
+      db.issues.some(x => x.itemId === itemId && (x.to === branch || x.from === branch) && x.date < date) ||
+      (branch === "Store" && db.purchases.some(p => p.itemId === itemId && p.date < date)) ||
+      (db.adjustments || []).some(a => a.branch === branch && a.itemId === itemId && a.date < date);
+    if (!hasPriorHistory) return Number(db.openingStock?.[branch]?.[itemId] || 0);
+    return 0;
   };
 
   // ---- Live Google Sheet (DesiFlow POS) reports ----
