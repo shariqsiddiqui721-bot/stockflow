@@ -1896,7 +1896,9 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
 
   // Opening balance for an item at a branch: the previous day's actual recorded Ending count
   // Opening for a day is last night's counted Ending — the physical ground truth — not a theoretical
-  // running total. If nobody counted an ending the day before AND this item/branch has some tracked
+  // running total. Summed across all kitchens/stations (plus any branch-general entry) for that item,
+  // since endings are usually recorded per station, not as one combined branch figure.
+  // If nobody counted an ending the day before AND this item/branch has some tracked
   // history already, opening is 0 (a real gap in daily counting, treated honestly as unknown/zero).
   // But if this item/branch has NO history at all yet (true day one), there's nothing to be "honest"
   // about zeroing — fall back to the admin's manually-set Opening Stock baseline instead.
@@ -1905,8 +1907,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
     const d = new Date(date + "T00:00:00");
     d.setDate(d.getDate() - 1);
     const prevDay = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-    const prevEnding = db.endings.find(e => e.branch === branch && e.itemId === itemId && e.date === prevDay && !e.kitchenId);
-    if (prevEnding) return prevEnding.qty;
+    const prevEndings = db.endings.filter(e => e.branch === branch && e.itemId === itemId && e.date === prevDay);
+    if (prevEndings.length > 0) return round2(prevEndings.reduce((a, e) => a + Number(e.qty), 0));
     const hasPriorHistory =
       db.endings.some(e => e.branch === branch && e.itemId === itemId && e.date < date) ||
       db.issues.some(x => x.itemId === itemId && (x.to === branch || x.from === branch) && x.date < date) ||
@@ -2155,7 +2157,14 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             const fromPurchases = db.purchases.filter(p => p.itemId === itemId && p.date === eff && (p.branch || "Store") === branch).reduce((a, p) => a + p.qty, 0);
             return fromIssues + fromPurchases;
           };
-          const endingOf = (itemId) => db.endings.find(x => x.itemId === itemId && x.date === eff && x.branch === branch && (kitchenId ? x.kitchenId === kitchenId : true));
+          // When a specific kitchen is picked, only that kitchen's own count. Otherwise sum every
+          // matching ending for the branch that day — endings are usually recorded per kitchen/station,
+          // not as one combined branch total, so summing them gives the real branch-wide count.
+          const endingOf = (itemId) => {
+            const matches = db.endings.filter(x => x.itemId === itemId && x.date === eff && x.branch === branch && (kitchenId ? x.kitchenId === kitchenId : true));
+            if (matches.length === 0) return null;
+            return { qty: matches.reduce((a, x) => a + Number(x.qty), 0) };
+          };
 
           const rowsData = filteredItems.map(i => {
             const demand = demandOf(i.id);
@@ -3020,7 +3029,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             });
           });
           const rows = Object.values(groups).map(g => {
-            const ending = db.endings.find(e => e.branch === g.branch && e.itemId === g.rawItem.id && e.date === eff && !e.kitchenId);
+            const endingMatches = db.endings.filter(e => e.branch === g.branch && e.itemId === g.rawItem.id && e.date === eff);
+            const ending = endingMatches.length > 0 ? { qty: endingMatches.reduce((a, e) => a + Number(e.qty), 0) } : null;
             const opening = openingOf(g.branch, g.rawItem.id, eff);
             const received = db.issues.filter(x => x.itemId === g.rawItem.id && x.to === g.branch && x.date === eff).reduce((a, x) => a + x.qty, 0)
               + db.purchases.filter(p => p.itemId === g.rawItem.id && p.date === eff && (p.branch || "Store") === g.branch).reduce((a, p) => a + p.qty, 0);
