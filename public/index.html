@@ -36,8 +36,9 @@ const businessDateOf = (input) => {
 const todayStr = () => businessDateOf(new Date());
 const nowStr = () => new Date().toLocaleString();
 const money = (n) => "Rs " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-// Rounds away floating-point noise (0.1 + 0.2 style artifacts like 0.299999999999998) for display.
-const round2 = (n) => n === null || n === undefined || n === "" ? n : Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+// Rounds quantity values to at most 4 decimal places, clearing floating-point noise
+// (e.g. 2.56786 -> 2.5679, or 0.1+0.2-style artifacts like 0.299999999999998 -> 0.3).
+const round4 = (n) => n === null || n === undefined || n === "" ? n : Math.round((Number(n) + Number.EPSILON) * 10000) / 10000;
 
 // Demand runs on its own window: 9:00 PM through 6:00 PM the following calendar day.
 // e.g. "15 Aug demand" = everything entered from 14 Aug 9pm through 15 Aug 6pm.
@@ -1908,7 +1909,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
     d.setDate(d.getDate() - 1);
     const prevDay = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
     const prevEndings = db.endings.filter(e => e.branch === branch && e.itemId === itemId && e.date === prevDay);
-    if (prevEndings.length > 0) return round2(prevEndings.reduce((a, e) => a + Number(e.qty), 0));
+    if (prevEndings.length > 0) return round4(prevEndings.reduce((a, e) => a + Number(e.qty), 0));
     const hasPriorHistory =
       db.endings.some(e => e.branch === branch && e.itemId === itemId && e.date < date) ||
       db.issues.some(x => x.itemId === itemId && (x.to === branch || x.from === branch) && x.date < date) ||
@@ -2160,9 +2161,9 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
           // When a specific kitchen is picked, only that kitchen's own count. Otherwise sum every
           // matching ending for the branch that day — endings are usually recorded per kitchen/station,
           // not as one combined branch total, so summing them gives the real branch-wide count.
+          // No ending recorded at all counts as 0 (not "unknown") — same rule as Opening.
           const endingOf = (itemId) => {
             const matches = db.endings.filter(x => x.itemId === itemId && x.date === eff && x.branch === branch && (kitchenId ? x.kitchenId === kitchenId : true));
-            if (matches.length === 0) return null;
             return { qty: matches.reduce((a, x) => a + Number(x.qty), 0) };
           };
 
@@ -2171,9 +2172,9 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             const received = receivedOf(i.id);
             const e = endingOf(i.id);
             const opening = kitchenId ? null : openingOf(branch, i.id, eff);
-            const used = e ? round2((opening || 0) + received - e.qty) : null;
-            return { item: i, demand: round2(demand), received: round2(received), ending: e ? round2(e.qty) : null, used };
-          }).filter(r => r.demand !== 0 || r.received !== 0 || r.ending !== null);
+            const used = round4((opening || 0) + received - e.qty);
+            return { item: i, demand: round4(demand), received: round4(received), ending: round4(e.qty), used };
+          }).filter(r => r.demand !== 0 || r.received !== 0 || r.used !== 0);
 
           return (
             <ReportTable
@@ -3030,12 +3031,12 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
           });
           const rows = Object.values(groups).map(g => {
             const endingMatches = db.endings.filter(e => e.branch === g.branch && e.itemId === g.rawItem.id && e.date === eff);
-            const ending = endingMatches.length > 0 ? { qty: endingMatches.reduce((a, e) => a + Number(e.qty), 0) } : null;
+            const endingQty = endingMatches.reduce((a, e) => a + Number(e.qty), 0); // no ending recorded = 0, same rule as Opening
             const opening = openingOf(g.branch, g.rawItem.id, eff);
             const received = db.issues.filter(x => x.itemId === g.rawItem.id && x.to === g.branch && x.date === eff).reduce((a, x) => a + x.qty, 0)
               + db.purchases.filter(p => p.itemId === g.rawItem.id && p.date === eff && (p.branch || "Store") === g.branch).reduce((a, p) => a + p.qty, 0);
-            const actual = ending ? round2(opening + received - ending.qty) : null;
-            const diff = actual === null ? null : g.posCalc - actual;
+            const actual = round4(opening + received - endingQty);
+            const diff = g.posCalc - actual;
             return { ...g, actual, diff };
           }).sort((a, b) => a.rawItem.name.localeCompare(b.rawItem.name));
           const key = (r) => r.branch + "|" + r.rawItem.id;
@@ -3043,7 +3044,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
             <ReportTable
               title={`POS vs StockFlow — ${eff}`}
               onExport={() => downloadCSV("pos-vs-stock.csv", toCSV(
-                rows.flatMap(r => r.contributions.map(c => ({ branch: r.branch, rawItem: r.rawItem.name, soldItem: c.soldItemName, soldQty: c.soldQty, contribution: c.posCalc.toFixed(2), totalPosCalc: r.posCalc.toFixed(2), actual: r.actual === null ? "no ending count" : r.actual, diff: r.diff === null ? "" : r.diff.toFixed(2) }))),
+                rows.flatMap(r => r.contributions.map(c => ({ branch: r.branch, rawItem: r.rawItem.name, soldItem: c.soldItemName, soldQty: c.soldQty, contribution: c.posCalc.toFixed(4), totalPosCalc: r.posCalc.toFixed(4), actual: r.actual, diff: r.diff.toFixed(4) }))),
                 [{ label: "Branch", get: r => r.branch }, { label: "Raw Item", get: r => r.rawItem }, { label: "Sold Item", get: r => r.soldItem },
                  { label: "Qty Sold", get: r => r.soldQty }, { label: "Contribution", get: r => r.contribution }, { label: "Total POS Calc", get: r => r.totalPosCalc },
                  { label: "Actual Use", get: r => r.actual }, { label: "Difference", get: r => r.diff }]
@@ -3062,11 +3063,11 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
                     </div>
                     <div className="text-[11px] text-[#5C6B62] mb-1">
                       {r.contributions.map((c, i) => (
-                        <div key={i}>{c.soldQty} × {c.soldItemName} → {c.posCalc.toFixed(2)} {r.rawItem.unit}</div>
+                        <div key={i}>{c.soldQty} × {c.soldItemName} → {c.posCalc.toFixed(4)} {r.rawItem.unit}</div>
                       ))}
                     </div>
                     <div className={`text-[11px] font-semibold ${isOff ? "text-[#B33A3A]" : "text-[#8A9690]"}`}>
-                      Recipe needs total: {r.posCalc.toFixed(2)} {r.rawItem.unit} · StockFlow actual: {r.actual === null ? "no ending count yet" : `${r.actual} ${r.rawItem.unit}`}
+                      Recipe needs total: {r.posCalc.toFixed(4)} {r.rawItem.unit} · StockFlow actual: {r.actual} {r.rawItem.unit}
                     </div>
                     {r.diff !== null && r.diff < 0 && (
                       lossReasonFor === key(r) ? (
