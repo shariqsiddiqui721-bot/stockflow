@@ -946,7 +946,7 @@ function ItemQtyGrid({ items, values, setValues, stockCheck }) {
     <div className="space-y-2.5">
       {items.map(it => {
         const val = values[it.id] || "";
-        const avail = stockCheck ? stockCheck(it.id) : null;
+        const avail = stockCheck ? round4(stockCheck(it.id)) : null;
         const over = stockCheck && Number(val) > avail;
         return (
           <div key={it.id} className={`bg-white rounded-xl p-3 border-2 flex items-center justify-between gap-3 ${over ? "border-[#B33A3A]" : "border-[#EAE4D4]"}`}>
@@ -2117,14 +2117,14 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
       </div>
       <div className="px-4 pb-8">
         {tab === "Stock Balance" && (
-          <ReportTable title={dateFilter ? `Stock Balance as of ${dateFilter}` : "Stock Balance by Branch"} onExport={() => downloadCSV("stock-balance.csv", toCSV(filteredItems, [{ label: "Item", get: i => i.name }, { label: "Category", get: i => i.category }, ...myBranches.map(b => ({ label: b, get: i => stockOf(b, i.id, dateFilter) }))]))}>
+          <ReportTable title={dateFilter ? `Stock Balance as of ${dateFilter}` : "Stock Balance by Branch"} onExport={() => downloadCSV("stock-balance.csv", toCSV(filteredItems, [{ label: "Item", get: i => i.name }, { label: "Category", get: i => i.category }, ...myBranches.map(b => ({ label: b, get: i => round4(stockOf(b, i.id, dateFilter)) }))]))}>
             <table className="w-full text-sm">
               <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th>{myBranches.map(b => <th key={b} className="text-right py-1.5">{b}</th>)}</tr></thead>
               <tbody>
                 {filteredItems.map(i => (
                   <tr key={i.id} className="border-t border-[#EFEBDF]">
                     <td className="py-2 font-medium">{i.name}</td>
-                    {myBranches.map(b => { const v = stockOf(b, i.id, dateFilter); return <td key={b} className={`text-right py-2 font-mono ${v < 0 ? "text-[#B33A3A]" : v <= 5 && v >= 0 ? "text-[#B3562C] font-bold" : ""}`}>{v}</td>; })}
+                    {myBranches.map(b => { const v = round4(stockOf(b, i.id, dateFilter)); return <td key={b} className={`text-right py-2 font-mono ${v < 0 ? "text-[#B33A3A]" : v <= 5 && v >= 0 ? "text-[#B3562C] font-bold" : ""}`}>{v}</td>; })}
                   </tr>
                 ))}
               </tbody>
