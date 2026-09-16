@@ -510,31 +510,59 @@ function App() {
     dbNext.log = [{ id: uid("l"), at: nowStr(), date: todayStr(), user: session?.name || "-", action, detail }, ...dbNext.log].slice(0, 2000);
   };
 
+  // Opening for a day is last night's counted Ending — the physical ground truth — not a theoretical
+  // running total. Summed across all kitchens/stations (plus any branch-general entry) for that item,
+  // since endings are usually recorded per station, not as one combined branch figure.
+  // If nobody counted an ending the day before AND this item/branch has some tracked
+  // history already, opening is 0 (a real gap in daily counting, treated honestly as unknown/zero).
+  // But if this item/branch has NO history at all yet (true day one), there's nothing to be "honest"
+  // about zeroing — fall back to the admin's manually-set Opening Stock baseline instead.
+  const openingOf = useMemo(() => (branch, itemId, date) => {
+    if (!db || !date) return 0;
+    const d = new Date(date + "T00:00:00");
+    d.setDate(d.getDate() - 1);
+    const prevDay = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    const prevEndings = db.endings.filter(e => e.branch === branch && e.itemId === itemId && e.date === prevDay);
+    if (prevEndings.length > 0) return round4(prevEndings.reduce((a, e) => a + Number(e.qty), 0));
+    const hasPriorHistory =
+      db.endings.some(e => e.branch === branch && e.itemId === itemId && e.date < date) ||
+      db.issues.some(x => x.itemId === itemId && (x.to === branch || x.from === branch) && x.date < date) ||
+      (branch === "Store" && db.purchases.some(p => p.itemId === itemId && p.date < date)) ||
+      (db.adjustments || []).some(a => a.branch === branch && a.itemId === itemId && a.date < date);
+    if (!hasPriorHistory) return Number(db.openingStock?.[branch]?.[itemId] || 0);
+    return 0;
+  }, [db]);
+
+  // Stock is NOT a lifetime running total — it resets daily off the last counted Ending, matching
+  // how the business actually thinks about it:
+  //  - If today's ending was actually counted, that IS today's stock, full stop (ground truth wins).
+  //  - Otherwise, stock = today's Opening (yesterday's ending, or the admin baseline on day one)
+  //    plus today's purchases/received, minus today's outgoing issues/adjustments so far.
   const stockOf = useMemo(() => (branch, itemId, asOfDate) => {
     if (!db) return 0;
-    let qty = Number(db.openingStock?.[branch]?.[itemId] || 0);
+    const date = asOfDate || todayStr();
+    const endingMatches = db.endings.filter(e => e.branch === branch && e.itemId === itemId && e.date === date);
+    if (endingMatches.length > 0) return round4(endingMatches.reduce((a, e) => a + Number(e.qty), 0));
+    let qty = openingOf(branch, itemId, date);
     // Credit purchases always arrive at Store (billed centrally, distributed via Issue).
     // Cash purchases belong directly to whichever branch they were made for — that branch owns
     // that stock immediately, it does not pass through Store first.
     db.purchases.forEach(p => {
-      if (p.itemId !== itemId) return;
-      if (asOfDate && p.date > asOfDate) return;
+      if (p.itemId !== itemId || p.date !== date) return;
       const pBranch = p.branch || "Store";
       if (pBranch === branch) qty += Number(p.qty);
     });
     db.issues.forEach(iss => {
-      if (iss.itemId !== itemId) return;
-      if (asOfDate && iss.date > asOfDate) return;
+      if (iss.itemId !== itemId || iss.date !== date) return;
       if (iss.from === branch) qty -= Number(iss.qty);
       if (iss.to === branch) qty += Number(iss.qty);
     });
     (db.adjustments || []).forEach(a => {
-      if (a.itemId !== itemId || a.branch !== branch) return;
-      if (asOfDate && a.date > asOfDate) return;
+      if (a.itemId !== itemId || a.branch !== branch || a.date !== date) return;
       qty += Number(a.qty);
     });
-    return qty;
-  }, [db]);
+    return round4(qty);
+  }, [db, openingOf]);
 
   const balanceOf = useMemo(() => (supplierId) => {
     if (!db) return 0;
@@ -554,7 +582,7 @@ function App() {
   if (!db) return <div className="min-h-screen flex items-center justify-center text-[#1F2A24] font-semibold">Loading…</div>;
   if (!session) return <LoginScreen db={db} onLogin={(u) => { setSession(u); setScreen("menu"); }} />;
 
-  const commonProps = { db, session, persist, mergeAttendance, mergePayment, addLog, flash, stockOf, balanceOf, lastBillOf, setScreen };
+  const commonProps = { db, session, persist, mergeAttendance, mergePayment, addLog, flash, stockOf, openingOf, balanceOf, lastBillOf, setScreen };
 
   return (
     <div className="min-h-screen bg-[#F4EFE4] pb-8">
@@ -1837,7 +1865,7 @@ const REPORT_TABS = ["Stock Balance", "Material Used", "Purchases", "Cash Materi
 const POS_BRANCH_MAP = { "Federal B Area": "FB", "North Nazimabad": "North" };
 const mapPosBranch = (b) => POS_BRANCH_MAP[b] || b;
 
-function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf, onBack }) {
+function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf, balanceOf, onBack }) {
   const myBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
   const myTabs = (session.reportTabs && session.reportTabs.length) ? REPORT_TABS.filter(t => session.reportTabs.includes(t)) : REPORT_TABS;
   const [tab, setTab] = useState(myTabs[0] || REPORT_TABS[0]);
@@ -1895,29 +1923,6 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, balanceOf
     persist(next);
   };
 
-  // Opening balance for an item at a branch: the previous day's actual recorded Ending count
-  // Opening for a day is last night's counted Ending — the physical ground truth — not a theoretical
-  // running total. Summed across all kitchens/stations (plus any branch-general entry) for that item,
-  // since endings are usually recorded per station, not as one combined branch figure.
-  // If nobody counted an ending the day before AND this item/branch has some tracked
-  // history already, opening is 0 (a real gap in daily counting, treated honestly as unknown/zero).
-  // But if this item/branch has NO history at all yet (true day one), there's nothing to be "honest"
-  // about zeroing — fall back to the admin's manually-set Opening Stock baseline instead.
-  const openingOf = (branch, itemId, date) => {
-    if (!date) return 0;
-    const d = new Date(date + "T00:00:00");
-    d.setDate(d.getDate() - 1);
-    const prevDay = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-    const prevEndings = db.endings.filter(e => e.branch === branch && e.itemId === itemId && e.date === prevDay);
-    if (prevEndings.length > 0) return round4(prevEndings.reduce((a, e) => a + Number(e.qty), 0));
-    const hasPriorHistory =
-      db.endings.some(e => e.branch === branch && e.itemId === itemId && e.date < date) ||
-      db.issues.some(x => x.itemId === itemId && (x.to === branch || x.from === branch) && x.date < date) ||
-      (branch === "Store" && db.purchases.some(p => p.itemId === itemId && p.date < date)) ||
-      (db.adjustments || []).some(a => a.branch === branch && a.itemId === itemId && a.date < date);
-    if (!hasPriorHistory) return Number(db.openingStock?.[branch]?.[itemId] || 0);
-    return 0;
-  };
 
   // ---- Live Google Sheet (DesiFlow POS) reports ----
   const posSheetId = extractSheetId(db.posSheetLink);
