@@ -533,14 +533,35 @@ function App() {
     return 0;
   }, [db]);
 
-  // Stock is NOT a lifetime running total — it resets daily off the last counted Ending, matching
-  // how the business actually thinks about it:
-  //  - If today's ending was actually counted, that IS today's stock, full stop (ground truth wins).
-  //  - Otherwise, stock = today's Opening (yesterday's ending, or the admin baseline on day one)
-  //    plus today's purchases/received, minus today's outgoing issues/adjustments so far.
+  // Stock behaves differently for Store vs the branches:
+  //  - Store never resets off a physical Ending count — it's the source that purchases, converts,
+  //    and distributes outward, so its stock is a continuous running total: everything
+  //    purchased/made(converted)/received in/found, minus everything issued out or lost, since the start.
+  //  - Branches reset daily off the last counted Ending (ground truth). If today's ending was
+  //    actually counted, that IS today's stock, full stop. Otherwise, stock = today's Opening
+  //    (yesterday's ending, or the admin baseline on day one) plus today's purchases/received,
+  //    minus today's outgoing issues/adjustments so far.
   const stockOf = useMemo(() => (branch, itemId, asOfDate) => {
     if (!db) return 0;
     const date = asOfDate || todayStr();
+    if (branch === "Store") {
+      let qty = Number(db.openingStock?.[branch]?.[itemId] || 0);
+      db.purchases.forEach(p => {
+        if (p.itemId !== itemId || p.date > date) return;
+        const pBranch = p.branch || "Store";
+        if (pBranch === branch) qty += Number(p.qty);
+      });
+      db.issues.forEach(iss => {
+        if (iss.itemId !== itemId || iss.date > date) return;
+        if (iss.from === branch) qty -= Number(iss.qty);
+        if (iss.to === branch) qty += Number(iss.qty);
+      });
+      (db.adjustments || []).forEach(a => {
+        if (a.itemId !== itemId || a.branch !== branch || a.date > date) return;
+        qty += Number(a.qty);
+      });
+      return round4(qty);
+    }
     const endingMatches = db.endings.filter(e => e.branch === branch && e.itemId === itemId && e.date === date);
     if (endingMatches.length > 0) return round4(endingMatches.reduce((a, e) => a + Number(e.qty), 0));
     let qty = openingOf(branch, itemId, date);
