@@ -2028,7 +2028,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
     else loadPosSales(true);
   };
   useEffect(() => {
-    if ((tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock" || tab === "Owner Ledger") && !posSalesRows && !posLoading) loadPosSales();
+    if ((tab === "POS Sale" || tab === "POS Item Sale" || tab === "POS vs Stock" || tab === "Owner Ledger" || tab === "Material Used") && !posSalesRows && !posLoading) loadPosSales();
     if (tab === "POS Void/Less" && !posVoidRows && !posLoading) loadPosVoid();
   }, [tab]);
 
@@ -2084,6 +2084,37 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
     });
     return byBranch;
   }, [posSalesFiltered.length, dateFilter]);
+
+  // Live, recipe-based estimate of how much of a raw item has been used SO FAR TODAY at a branch,
+  // from what's actually been sold via POS — used only while the day is still open (before an actual
+  // ending has been counted). Filters posSalesRows directly by the exact date/branch requested,
+  // independent of whatever the report's own date filter is currently set to.
+  const posRecipeUsageOf = (branch, itemId, date) => {
+    if (!posSalesRows) return null;
+    const soldOnDate = {};
+    posSalesRows.forEach(r => {
+      if (validBusinessDate(r) !== date) return;
+      const sfBranch = mapPosBranch(r.Branch);
+      if (sfBranch !== branch && r.Branch !== "ALL") return;
+      parseSoldItemsText(r.Items).forEach(({ name, qty }) => { soldOnDate[name] = (soldOnDate[name] || 0) + qty; });
+    });
+    let total = 0, matched = false;
+    (db.recipes || []).forEach(recipe => {
+      if (recipe.branch && recipe.branch !== branch) return;
+      const consumeEntry = recipe.consumes.find(c => c.itemId === itemId);
+      if (!consumeEntry) return;
+      recipe.produces.forEach(p => {
+        const soldItem = db.items.find(i => i.id === p.itemId);
+        if (!soldItem) return;
+        const soldQty = soldOnDate[soldItem.name] || Object.entries(soldOnDate).find(([n]) => n.toLowerCase() === soldItem.name.toLowerCase())?.[1] || 0;
+        if (soldQty === 0) return;
+        matched = true;
+        const batches = soldQty / (p.qty || 1);
+        total += consumeEntry.qty * batches;
+      });
+    });
+    return matched ? round4(total) : 0;
+  };
 
   // Maps a raw POS "Payment Method" value to one of our 4 owner-ledger modes.
   const paymentModeOf = (raw) => {
@@ -2187,19 +2218,40 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
           // When a specific kitchen is picked, only that kitchen's own count. Otherwise sum every
           // matching ending for the branch that day — endings are usually recorded per kitchen/station,
           // not as one combined branch total, so summing them gives the real branch-wide count.
-          // No ending recorded at all counts as 0 (not "unknown") — same rule as Opening.
           const endingOf = (itemId) => {
             const matches = db.endings.filter(x => x.itemId === itemId && x.date === eff && x.branch === branch && (kitchenId ? x.kitchenId === kitchenId : true));
-            return { qty: matches.reduce((a, x) => a + Number(x.qty), 0) };
+            return { qty: matches.reduce((a, x) => a + Number(x.qty), 0), recorded: matches.length > 0 };
           };
+          const isToday = eff === todayStr();
 
           const rowsData = filteredItems.map(i => {
             const demand = demandOf(i.id);
             const received = receivedOf(i.id);
             const e = endingOf(i.id);
             const opening = kitchenId ? null : openingOf(branch, i.id, eff);
-            const used = round4((opening || 0) + received - e.qty);
-            return { item: i, demand: round4(demand), received: round4(received), ending: round4(e.qty), used };
+            let used, endingVal, estimated = false;
+            if (e.recorded) {
+              // Ground truth: an actual count exists for today — use it, full stop.
+              endingVal = e.qty;
+              used = round4((opening || 0) + received - endingVal);
+            } else if (isToday && !kitchenId) {
+              // Still mid-day, nothing counted yet: estimate Used from what's actually sold via POS
+              // so far today (through Recipes), and back into an estimated Ending from that.
+              const posUsed = posRecipeUsageOf(branch, i.id, eff);
+              if (posUsed !== null) {
+                used = posUsed;
+                endingVal = round4((opening || 0) + received - posUsed);
+                estimated = true;
+              } else {
+                endingVal = 0;
+                used = round4((opening || 0) + received);
+              }
+            } else {
+              // A past day that was never counted, or a kitchen-specific view — honest zero.
+              endingVal = 0;
+              used = round4((opening || 0) + received);
+            }
+            return { item: i, demand: round4(demand), received: round4(received), ending: round4(endingVal), used, estimated };
           }).filter(r => r.demand !== 0 || r.received !== 0 || r.used !== 0);
 
           return (
@@ -2208,7 +2260,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
               onExport={() => downloadCSV("material-used.csv", toCSV(rowsData, [
                 { label: "Item", get: r => r.item.name }, { label: "Demand", get: r => r.demand },
                 { label: "Received", get: r => r.received }, { label: "Ending", get: r => r.ending ?? "" },
-                { label: "Used", get: r => r.used ?? "" },
+                { label: "Used", get: r => r.used ?? "" }, { label: "Estimated", get: r => r.estimated ? "yes (from POS/recipe, not counted yet)" : "" },
               ]))}
             >
               <div className="mb-3">
@@ -2216,6 +2268,9 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
                   {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
               </div>
+              {rowsData.some(r => r.estimated) && (
+                <div className="text-[11px] text-[#B3562C] bg-[#FBF0DD] rounded-lg px-2.5 py-1.5 mb-3">Ending/Used shown in orange today are estimated from POS sales via Recipes — nobody's counted the actual ending yet.</div>
+              )}
               <table className="w-full text-sm">
                 <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Demand</th><th className="text-right py-1.5">Received</th><th className="text-right py-1.5">Ending</th><th className="text-right py-1.5 font-bold">Used</th></tr></thead>
                 <tbody>
@@ -2224,8 +2279,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
                       <td className="py-2 font-medium">{r.item.name}{r.item.nameUr && <span className="text-[#8A9690]"> — {r.item.nameUr}</span>}</td>
                       <td className="text-right py-2 font-mono">{r.demand}</td>
                       <td className="text-right py-2 font-mono">{r.received}</td>
-                      <td className="text-right py-2 font-mono">{r.ending ?? "–"}</td>
-                      <td className="text-right py-2 font-mono font-bold">{r.used !== null ? r.used : "–"}</td>
+                      <td className={`text-right py-2 font-mono ${r.estimated ? "text-[#B3562C]" : ""}`}>{r.ending ?? "–"}</td>
+                      <td className={`text-right py-2 font-mono font-bold ${r.estimated ? "text-[#B3562C]" : ""}`}>{r.used !== null ? r.used : "–"}</td>
                     </tr>
                   ))}
                   {rowsData.length === 0 && <tr><td colSpan={5} className="py-3 text-[#8A9690]">No entries.</td></tr>}
