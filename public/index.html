@@ -799,11 +799,9 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
   const supplierItems = itemsForUser(db, session, supplier ? db.items.filter(i => supplier.itemIds.includes(i.id)) : []);
   const supplierCats = [...new Set(supplierItems.map(i => i.category))];
   const cashCategories = categoriesForUser(db, session, null);
-  const visibleItemsRaw = payMode === "cash"
+  const visibleItems = payMode === "cash"
     ? (category ? itemsForUser(db, session, db.items.filter(i => i.category === category)) : [])
     : (category ? supplierItems.filter(i => i.category === category) : supplierItems);
-  // Favorites pinned to the top, everything else keeps its normal order after.
-  const visibleItems = [...visibleItemsRaw.filter(i => i.favorite), ...visibleItemsRaw.filter(i => !i.favorite)];
 
   useEffect(() => { setRows({}); setCategory(""); }, [supplierId, payMode]);
 
@@ -963,7 +961,7 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
             return (
               <div key={it.id} className="bg-white rounded-xl p-3 border-2 border-[#EAE4D4]">
                 <div className="flex items-center justify-between mb-2">
-                  <div className="font-semibold text-[#1F2A24]">{it.favorite && <span className="text-[#C98A2C]">★ </span>}{it.name}{it.nameUr && <span className="text-[#8A9690] font-normal"> — {it.nameUr}</span>}</div>
+                  <div className="font-semibold text-[#1F2A24]">{it.name}{it.nameUr && <span className="text-[#8A9690] font-normal"> — {it.nameUr}</span>}</div>
                   <div className="text-[11px] text-[#8A9690]">{it.unit}{p?.cashOnly ? " · cash only" : ""}</div>
                 </div>
                 <div className="grid grid-cols-3 gap-2 items-center">
@@ -993,22 +991,16 @@ function PurchaseScreen({ db, session, persist, addLog, flash, onDone }) {
 /* ---------- Shared grid ---------- */
 
 function ItemQtyGrid({ items, values, setValues, stockCheck }) {
-  // Favorites pinned to the top (in whatever order they were), everything else keeps its normal order after.
-  const ordered = useMemo(() => {
-    const favs = items.filter(it => it.favorite);
-    const rest = items.filter(it => !it.favorite);
-    return [...favs, ...rest];
-  }, [items]);
   return (
     <div className="space-y-2.5">
-      {ordered.map(it => {
+      {items.map(it => {
         const val = values[it.id] || "";
         const avail = stockCheck ? round4(stockCheck(it.id)) : null;
         const over = stockCheck && Number(val) > avail;
         return (
-          <div key={it.id} className={`bg-white rounded-xl p-3 border-2 flex items-center justify-between gap-3 ${over ? "border-[#B33A3A]" : it.favorite ? "border-[#C98A2C]" : "border-[#EAE4D4]"}`}>
+          <div key={it.id} className={`bg-white rounded-xl p-3 border-2 flex items-center justify-between gap-3 ${over ? "border-[#B33A3A]" : "border-[#EAE4D4]"}`}>
             <div className="min-w-0">
-              <div className="font-semibold text-[#1F2A24] truncate">{it.favorite && <span className="text-[#C98A2C]">★ </span>}{it.name}{it.nameUr && <span className="text-[#8A9690] font-normal"> — {it.nameUr}</span>}</div>
+              <div className="font-semibold text-[#1F2A24] truncate">{it.name}{it.nameUr && <span className="text-[#8A9690] font-normal"> — {it.nameUr}</span>}</div>
               <div className="text-[11px] text-[#8A9690]">{it.unit}{stockCheck && <span className={over ? "text-[#B33A3A] font-bold" : ""}> · {avail} in stock</span>}</div>
             </div>
             <input className="w-24 bg-[#F7F5F0] border-2 border-[#D8D2C2] rounded-lg px-2 py-2 text-right font-mono font-bold text-[16px] focus:outline-none focus:border-[#C98A2C]"
@@ -2096,9 +2088,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
   // Live, recipe-based estimate of how much of a raw item has been used SO FAR TODAY at a branch,
   // from what's actually been sold via POS — used only while the day is still open (before an actual
   // ending has been counted). Filters posSalesRows directly by the exact date/branch requested,
-  // independent of whatever the report's own date filter is currently set to, so it's always accurate
-  // for "today" regardless of what's selected on screen. Returns null if there's no POS data at all
-  // to estimate from (so callers can fall back to the honest-zero rule).
+  // independent of whatever the report's own date filter is currently set to.
   const posRecipeUsageOf = (branch, itemId, date) => {
     if (!posSalesRows) return null;
     const soldOnDate = {};
@@ -2225,9 +2215,6 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
             const fromPurchases = db.purchases.filter(p => p.itemId === itemId && p.date === eff && (p.branch || "Store") === branch).reduce((a, p) => a + p.qty, 0);
             return fromIssues + fromPurchases;
           };
-          // Stock that left THIS branch for another branch that same day — a transfer out, not
-          // consumption, so it must be subtracted separately from Used (it's not "used" here).
-          const issuedOutOf = (itemId) => db.issues.filter(x => x.itemId === itemId && x.date === eff && x.from === branch).reduce((a, x) => a + x.qty, 0);
           // When a specific kitchen is picked, only that kitchen's own count. Otherwise sum every
           // matching ending for the branch that day — endings are usually recorded per kitchen/station,
           // not as one combined branch total, so summing them gives the real branch-wide count.
@@ -2240,61 +2227,58 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
           const rowsData = filteredItems.map(i => {
             const demand = demandOf(i.id);
             const received = receivedOf(i.id);
-            const issuedOut = kitchenId ? 0 : issuedOutOf(i.id);
             const e = endingOf(i.id);
             const opening = kitchenId ? null : openingOf(branch, i.id, eff);
             let used, endingVal, estimated = false;
             if (e.recorded) {
-              // Ground truth: an actual count exists for today — use it, full stop, never a recipe guess.
+              // Ground truth: an actual count exists for today — use it, full stop.
               endingVal = e.qty;
-              used = round4((opening || 0) + received - endingVal - issuedOut);
+              used = round4((opening || 0) + received - endingVal);
             } else if (isToday && !kitchenId) {
               // Still mid-day, nothing counted yet: estimate Used from what's actually sold via POS
-              // so far today (through Recipes), and back into an estimated current stock/ending from that.
+              // so far today (through Recipes), and back into an estimated Ending from that.
               const posUsed = posRecipeUsageOf(branch, i.id, eff);
               if (posUsed !== null) {
                 used = posUsed;
-                endingVal = round4((opening || 0) + received - issuedOut - posUsed);
+                endingVal = round4((opening || 0) + received - posUsed);
                 estimated = true;
               } else {
                 endingVal = 0;
-                used = round4((opening || 0) + received - issuedOut);
+                used = round4((opening || 0) + received);
               }
             } else {
               // A past day that was never counted, or a kitchen-specific view — honest zero.
               endingVal = 0;
-              used = round4((opening || 0) + received - issuedOut);
+              used = round4((opening || 0) + received);
             }
-            return { item: i, demand: round4(demand), received: round4(received), issuedOut: round4(issuedOut), ending: round4(endingVal), used, estimated };
-          }).filter(r => r.demand !== 0 || r.received !== 0 || r.used !== 0 || r.issuedOut !== 0);
+            return { item: i, demand: round4(demand), received: round4(received), ending: round4(endingVal), used, estimated };
+          }).filter(r => r.demand !== 0 || r.received !== 0 || r.used !== 0);
 
           return (
             <ReportTable
               title={`Material Used — ${current?.label} — ${eff}`}
               onExport={() => downloadCSV("material-used.csv", toCSV(rowsData, [
                 { label: "Item", get: r => r.item.name }, { label: "Demand", get: r => r.demand },
-                { label: "Received", get: r => r.received }, { label: "Issued Out", get: r => r.issuedOut },
-                { label: "Ending", get: r => r.ending ?? "" },
+                { label: "Received", get: r => r.received }, { label: "Ending", get: r => r.ending ?? "" },
                 { label: "Used", get: r => r.used ?? "" }, { label: "Estimated", get: r => r.estimated ? "yes (from POS/recipe, not counted yet)" : "" },
               ]))}
             >
-              {rowsData.some(r => r.estimated) && (
-                <div className="text-[11px] text-[#B3562C] bg-[#FBF0DD] rounded-lg px-2.5 py-1.5 mb-3">Ending/Used shown in orange today are estimated from POS sales via Recipes — nobody's counted the actual ending yet.</div>
-              )}
               <div className="mb-3">
                 <select className="w-full bg-white border-2 border-[#D8D2C2] rounded-xl px-3 py-2.5 text-sm font-medium" value={muBranch} onChange={e => setMuBranch(e.target.value)}>
                   {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
               </div>
+              {rowsData.some(r => r.estimated) && (
+                <div className="text-[11px] text-[#B3562C] bg-[#FBF0DD] rounded-lg px-2.5 py-1.5 mb-3">Ending/Used shown in orange today are estimated from POS sales via Recipes — nobody's counted the actual ending yet.</div>
+              )}
               <table className="w-full text-sm">
-                <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Demand</th><th className="text-right py-1.5">Received</th><th className="text-right py-1.5">Issued Out</th><th className="text-right py-1.5">Ending</th><th className="text-right py-1.5 font-bold">Used</th></tr></thead>
+                <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Item</th><th className="text-right py-1.5">Demand</th><th className="text-right py-1.5">Received</th><th className="text-right py-1.5">Ending</th><th className="text-right py-1.5 font-bold">Used</th></tr></thead>
                 <tbody>
                   {rowsData.map(r => (
                     <tr key={r.item.id} className="border-t border-[#EFEBDF]">
                       <td className="py-2 font-medium">{r.item.name}{r.item.nameUr && <span className="text-[#8A9690]"> — {r.item.nameUr}</span>}</td>
                       <td className="text-right py-2 font-mono">{r.demand}</td>
                       <td className="text-right py-2 font-mono">{r.received}</td>
-                      <td className="text-right py-2 font-mono">{r.issuedOut || "–"}</td>
                       <td className={`text-right py-2 font-mono ${r.estimated ? "text-[#B3562C]" : ""}`}>{r.ending ?? "–"}</td>
                       <td className={`text-right py-2 font-mono font-bold ${r.estimated ? "text-[#B3562C]" : ""}`}>{r.used !== null ? r.used : "–"}</td>
                     </tr>
@@ -3126,26 +3110,15 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
               });
             });
           });
-          const isToday = eff === todayStr();
           const rows = Object.values(groups).map(g => {
             const endingMatches = db.endings.filter(e => e.branch === g.branch && e.itemId === g.rawItem.id && e.date === eff);
+            const endingQty = endingMatches.reduce((a, e) => a + Number(e.qty), 0); // no ending recorded = 0, same rule as Opening
             const opening = openingOf(g.branch, g.rawItem.id, eff);
             const received = db.issues.filter(x => x.itemId === g.rawItem.id && x.to === g.branch && x.date === eff).reduce((a, x) => a + x.qty, 0)
               + db.purchases.filter(p => p.itemId === g.rawItem.id && p.date === eff && (p.branch || "Store") === g.branch).reduce((a, p) => a + p.qty, 0);
-            const issuedOut = db.issues.filter(x => x.itemId === g.rawItem.id && x.from === g.branch && x.date === eff).reduce((a, x) => a + x.qty, 0);
-            let actual, estimated = false;
-            if (endingMatches.length > 0) {
-              const endingQty = endingMatches.reduce((a, e) => a + Number(e.qty), 0);
-              actual = round4(opening + received - endingQty - issuedOut);
-            } else if (isToday) {
-              const posUsed = posRecipeUsageOf(g.branch, g.rawItem.id, eff);
-              if (posUsed !== null) { actual = round4(opening + received - issuedOut - posUsed); estimated = true; }
-              else actual = round4(opening + received - issuedOut);
-            } else {
-              actual = round4(opening + received - issuedOut);
-            }
-            const diff = round4(g.posCalc - actual);
-            return { ...g, actual, diff, estimated };
+            const actual = round4(opening + received - endingQty);
+            const diff = g.posCalc - actual;
+            return { ...g, actual, diff };
           }).sort((a, b) => a.rawItem.name.localeCompare(b.rawItem.name));
           const key = (r) => r.branch + "|" + r.rawItem.id;
           return (
@@ -3174,8 +3147,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
                         <div key={i}>{c.soldQty} × {c.soldItemName} → {c.posCalc.toFixed(4)} {r.rawItem.unit}</div>
                       ))}
                     </div>
-                    <div className={`text-[11px] font-semibold ${isOff ? "text-[#B33A3A]" : r.estimated ? "text-[#B3562C]" : "text-[#8A9690]"}`}>
-                      Recipe needs total: {r.posCalc.toFixed(4)} {r.rawItem.unit} · StockFlow actual: {r.actual} {r.rawItem.unit}{r.estimated ? " (estimated — ending not counted yet)" : ""}
+                    <div className={`text-[11px] font-semibold ${isOff ? "text-[#B33A3A]" : "text-[#8A9690]"}`}>
+                      Recipe needs total: {r.posCalc.toFixed(4)} {r.rawItem.unit} · StockFlow actual: {r.actual} {r.rawItem.unit}
                     </div>
                     {r.diff !== null && r.diff < 0 && (
                       lossReasonFor === key(r) ? (
@@ -3411,7 +3384,6 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
 
   const addItem = () => { if (!newItemName.trim()) return; const rec = { id: uid("i"), name: newItemName.trim(), nameUr: newItemNameUr.trim(), category: newItemCat, unit: newItemUnit || "unit" }; const next = { ...db, items: [...db.items, rec] }; addLog(next, "Admin", `Added item ${rec.name}`); persist(next); setNewItemName(""); setNewItemNameUr(""); flash("Item added"); };
   const delItem = (id) => persist({ ...db, items: db.items.filter(i => i.id !== id) });
-  const toggleItemFavorite = (id) => persist({ ...db, items: db.items.map(i => i.id === id ? { ...i, favorite: !i.favorite } : i) });
   const startEditItem = (i) => { setEditItemId(i.id); setEditItemDraft({ name: i.name, nameUr: i.nameUr || "", category: i.category, unit: i.unit }); };
   const saveEditItem = () => {
     const next = { ...db, items: db.items.map(i => i.id === editItemId ? { ...i, ...editItemDraft } : i) };
@@ -3516,17 +3488,6 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
     persist(next); setRecipeName(""); setRecipeBranch(""); setRecipeConsumes([]); setRecipeProduces([]); flash("Recipe added");
   };
   const delRecipe = (id) => persist({ ...db, recipes: (db.recipes || []).filter(r => r.id !== id) });
-  // Renames every recipe to reflect what it actually produces (e.g. "Chicken Biryani" instead of a
-  // generic number), joining multiple produced items with " + " if a recipe makes more than one.
-  const autoNameRecipes = () => {
-    const recipes = (db.recipes || []).map(r => {
-      const names = r.produces.map(p => db.items.find(i => i.id === p.itemId)?.name).filter(Boolean);
-      return names.length ? { ...r, name: names.join(" + ") } : r;
-    });
-    const next = { ...db, recipes };
-    addLog(next, "Admin", "Renamed recipes to match their produced items");
-    persist(next); flash("Recipe names updated");
-  };
   const startEditRecipe = (r) => { setEditRecipeId(r.id); setEditRecipeDraft({ name: r.name, branch: r.branch || "", consumes: [...r.consumes], produces: [...r.produces] }); };
   const saveEditRecipe = () => {
     if (!editRecipeDraft.name.trim() || editRecipeDraft.consumes.length === 0 || editRecipeDraft.produces.length === 0) { flash("Name, at least one used item and one made item required", "error"); return; }
@@ -3750,7 +3711,6 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
                 <div key={i.id} className="flex justify-between items-center bg-white rounded-lg p-2.5 mb-1.5 border border-[#EFEBDF]">
                   <span className="text-sm"><b>{i.name}</b>{i.nameUr && <span> · {i.nameUr}</span>} <span className="text-[#8A9690]">· {i.category} · {i.unit}</span></span>
                   <div className="flex items-center gap-3">
-                    <button onClick={() => toggleItemFavorite(i.id)} className={i.favorite ? "text-[#C98A2C]" : "text-[#D8D2C2]"} title="Favorite">{i.favorite ? "★" : "☆"}</button>
                     <button onClick={() => startEditItem(i)} className="text-[#5C6B62]">✎</button>
                     <button onClick={() => delItem(i.id)} className="text-[#B33A3A]">✕</button>
                   </div>
@@ -4027,7 +3987,6 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
               </div>
               <button onClick={addRecipe} className="bg-[#C98A2C] text-white w-full py-2.5 rounded-xl font-semibold">+ Add Recipe</button>
             </div>
-            <button onClick={autoNameRecipes} className="bg-white border-2 border-[#C98A2C] text-[#C98A2C] w-full py-2.5 rounded-xl font-semibold mb-4">Rename all recipes to match their items</button>
             <div className="bg-[#F7F5F0] rounded-xl p-3.5 border border-[#D8D2C2] mb-4">
               <div className="text-xs font-semibold text-[#5C6B62] mb-1.5">Bulk upload recipes (Excel/CSV columns: Recipe Name, Branch, Type, Item, Qty). Type is "Uses" or "Makes"; repeat the Recipe Name across rows to add multiple ingredients/outputs to the same recipe. Branch blank = any branch. Matches an existing recipe by exact name and replaces it; new names are added.</div>
               <FileUploadRow flash={flash} parser={parseMultiColFile} emptyMsg="No rows found — check the file has Recipe Name, Type, Item, and Qty columns" onRows={(rows) => {
