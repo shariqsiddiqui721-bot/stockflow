@@ -2114,9 +2114,9 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
     let total = 0, matched = false;
     (db.recipes || []).forEach(recipe => {
       if (recipe.branch && recipe.branch !== branch) return;
-      const consumeEntry = recipe.consumes.find(c => c.itemId === itemId);
+      const consumeEntry = (recipe.consumes || []).find(c => c.itemId === itemId);
       if (!consumeEntry) return;
-      recipe.produces.forEach(p => {
+      (recipe.produces || []).forEach(p => {
         const soldItem = db.items.find(i => i.id === p.itemId);
         if (!soldItem) return;
         const soldQty = soldOnDate[soldItem.name] || Object.entries(soldOnDate).find(([n]) => n.toLowerCase() === soldItem.name.toLowerCase())?.[1] || 0;
@@ -3194,7 +3194,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
           myBranches.forEach(branch => {
             (db.recipes || []).forEach(recipe => {
               if (recipe.branch && recipe.branch !== branch) return;
-              recipe.consumes.forEach(c => {
+              (recipe.consumes || []).forEach(c => {
                 const rawItem = db.items.find(i => i.id === c.itemId);
                 if (!rawItem) return;
                 const key = branch + "|" + c.itemId;
@@ -3205,15 +3205,16 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
           myBranches.forEach(branch => {
             (db.recipes || []).forEach(recipe => {
               if (recipe.branch && recipe.branch !== branch) return;
-              recipe.produces.forEach(p => {
+              (recipe.produces || []).forEach(p => {
                 const item = db.items.find(i => i.id === p.itemId);
                 if (!item) return;
                 const soldQty = (posItemQtySoldByBranch[branch] && (posItemQtySoldByBranch[branch][item.name] || Object.entries(posItemQtySoldByBranch[branch]).find(([n]) => n.toLowerCase() === item.name.toLowerCase())?.[1])) || 0;
                 if (soldQty === 0) return;
                 const batches = soldQty / (p.qty || 1);
-                recipe.consumes.forEach(c => {
-                  const posCalc = c.qty * batches;
+                (recipe.consumes || []).forEach(c => {
                   const key = branch + "|" + c.itemId;
+                  if (!groups[key]) return; // the raw item behind this consume entry no longer exists — skip safely
+                  const posCalc = c.qty * batches;
                   groups[key].posCalc += posCalc;
                   groups[key].contributions.push({ soldItemName: item.name, soldQty, posCalc });
                 });
@@ -3727,12 +3728,13 @@ function AdminScreen({ db, session, persist, addLog, flash, onBack }) {
     let matchedRecipes = 0;
     rows.forEach(row => {
       saleRecs.push({ id: uid("pos"), date: posUploadDate, branch: posUploadBranch, itemName: row.name, qty: row.value, source: "upload" });
-      const recipe = (db.recipes || []).find(r => (!r.branch || r.branch === posUploadBranch) && r.produces.some(p => db.items.find(i => i.id === p.itemId)?.name.toLowerCase() === row.name.toLowerCase()));
+      const recipe = (db.recipes || []).find(r => (!r.branch || r.branch === posUploadBranch) && (r.produces || []).some(p => db.items.find(i => i.id === p.itemId)?.name.toLowerCase() === row.name.toLowerCase()));
       if (recipe) {
         matchedRecipes++;
-        const producedEntry = recipe.produces.find(p => db.items.find(i => i.id === p.itemId)?.name.toLowerCase() === row.name.toLowerCase());
+        const producedEntry = (recipe.produces || []).find(p => db.items.find(i => i.id === p.itemId)?.name.toLowerCase() === row.name.toLowerCase());
+        if (!producedEntry) return;
         const batches = row.value / (producedEntry.qty || 1);
-        recipe.consumes.forEach(c => {
+        (recipe.consumes || []).forEach(c => {
           adjRecs.push({ id: uid("adj"), date: posUploadDate, branch: posUploadBranch, itemId: c.itemId, qty: -Math.abs(c.qty * batches), kind: "pos-sale", reason: `POS sale: ${row.value} × ${row.name} (recipe: ${recipe.name})`, userId: session.id });
         });
       }
