@@ -415,23 +415,25 @@ app.post("/api/pos/sales", async (req, res) => {
       if (!qty) continue;
       saleRecs.push({ id: uid("pos"), date: saleDate, branch, itemName: row.name, qty, source: "pos" });
 
-      const recipe = (data.recipes || []).find(r => (!r.branch || r.branch === branch) && r.produces.some(p => {
+      const recipe = (data.recipes || []).find(r => (!r.branch || r.branch === branch) && (r.produces || []).some(p => {
         const item = data.items.find(i => i.id === p.itemId);
         return item && item.name.toLowerCase() === row.name.toLowerCase();
       }));
       if (recipe) {
         matchedRecipes++;
-        const producedEntry = recipe.produces.find(p => {
+        const producedEntry = (recipe.produces || []).find(p => {
           const item = data.items.find(i => i.id === p.itemId);
           return item && item.name.toLowerCase() === row.name.toLowerCase();
         });
-        const batches = qty / (producedEntry.qty || 1);
-        recipe.consumes.forEach(c => {
-          adjRecs.push({
-            id: uid("adj"), date: saleDate, branch, itemId: c.itemId, qty: -Math.abs(c.qty * batches),
-            kind: "pos-sale", reason: `POS sale: ${qty} × ${row.name} (recipe: ${recipe.name})`, userId: "pos",
+        if (producedEntry) {
+          const batches = qty / (producedEntry.qty || 1);
+          (recipe.consumes || []).forEach(c => {
+            adjRecs.push({
+              id: uid("adj"), date: saleDate, branch, itemId: c.itemId, qty: -Math.abs(c.qty * batches),
+              kind: "pos-sale", reason: `POS sale: ${qty} × ${row.name} (recipe: ${recipe.name})`, userId: "pos",
+            });
           });
-        });
+        }
       }
     }
 
