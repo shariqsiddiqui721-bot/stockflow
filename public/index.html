@@ -1897,7 +1897,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
 /* ---------- Reports ---------- */
 
-const REPORT_TABS = ["Stock Balance", "Material Used", "Material Used by Recipe", "Purchases", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Labor Data", "Customer Reviews", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Owner Ledger", "Activity Log"];
+const REPORT_TABS = ["Stock Balance", "Material Used", "Material Used by Recipe", "Purchases", "Purchase Summary", "Cash Material", "Supplier Ledger", "Supplier Demand", "Demand", "Demand vs Issue", "By Category", "Kitchens", "Ending", "Adjustments", "Labor", "Labor Data", "Customer Reviews", "POS Sale", "POS Void/Less", "POS Item Sale", "POS vs Stock", "Owner Ledger", "Activity Log"];
 const POS_BRANCH_MAP = { "Federal B Area": "FB", "North Nazimabad": "North" };
 const mapPosBranch = (b) => POS_BRANCH_MAP[b] || b;
 
@@ -1917,6 +1917,8 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
   const [adjReason, setAdjReason] = useState("");
   const [ledgerSupplierId, setLedgerSupplierId] = useState(db.suppliers[0]?.id || "");
   const [ledgerBranch, setLedgerBranch] = useState("ALL");
+  const [psBranch, setPsBranch] = useState("ALL");
+  const [psOpen, setPsOpen] = useState(null);
   const ledgerSupplier = db.suppliers.find(s => s.id === ledgerSupplierId);
   const [editPurchaseId, setEditPurchaseId] = useState(null);
   const [editPurchaseDraft, setEditPurchaseDraft] = useState({});
@@ -2388,6 +2390,75 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
               )
             ))}
           </ReportTable>
+          );
+        })()}
+        {tab === "Purchase Summary" && (() => {
+          const brOk = (b) => (psBranch === "ALL" ? myBranches.includes(b || "Store") : (b || "Store") === psBranch);
+          const dOk = (d) => !dateFilter || d === dateFilter;
+          const pur = db.purchases.filter(p => brOk(p.branch) && dOk(p.date));
+          const pays = (db.payments || []).filter(x => brOk(x.branch) && dOk(x.date));
+          const sum = (a, f) => a.reduce((t, x) => t + (f(x) || 0), 0);
+          const credit = pur.filter(p => p.paymentMode !== "cash");
+          const cash = pur.filter(p => p.paymentMode === "cash");
+          const rows = [
+            ...db.suppliers.map(sp => ({ key: sp.id, name: sp.name, list: credit.filter(p => p.supplierId === sp.id), paid: sum(pays.filter(x => x.supplierId === sp.id), x => x.amount) })),
+            { key: "CASH", name: "Cash Purchase", list: cash, paid: 0 },
+          ].filter(r => r.list.length > 0 || r.paid > 0);
+          const branchRows = (psBranch === "ALL" ? myBranches : [psBranch]).map(b => {
+            const bp = db.purchases.filter(p => (p.branch || "Store") === b && dOk(p.date));
+            return { b, credit: sum(bp.filter(p => p.paymentMode !== "cash"), p => p.amount), cash: sum(bp.filter(p => p.paymentMode === "cash"), p => p.amount), paid: sum((db.payments || []).filter(x => (x.branch || "Store") === b && dOk(x.date)), x => x.amount) };
+          });
+          const open = rows.find(r => r.key === psOpen);
+          const itemsOf = (list) => { const m = {}; list.forEach(p => { const k = p.itemId; m[k] = m[k] || { qty: 0, amount: 0 }; m[k].qty = round4(m[k].qty + p.qty); m[k].amount += p.amount; }); return Object.entries(m).map(([id, v]) => ({ id, ...v })); };
+          return (
+            <div>
+              <select className={selCls + " mb-3"} value={psBranch} onChange={e => { setPsBranch(e.target.value); setPsOpen(null); }}>
+                <option value="ALL">All branches (Total)</option>
+                {myBranches.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+              <ReportTable title={`Branch Totals${dateFilter ? " — " + dateFilter : ""}`}>
+                <table className="w-full text-sm">
+                  <thead><tr className="text-left text-[#7A8880]"><th className="py-1.5">Branch</th><th className="text-right">Credit</th><th className="text-right">Cash</th><th className="text-right">Paid</th></tr></thead>
+                  <tbody>
+                    {branchRows.map(r => <tr key={r.b} className="border-t border-[#EFEBDF]"><td className="py-2 font-medium">{r.b}</td><td className="text-right font-mono">{money(r.credit)}</td><td className="text-right font-mono">{money(r.cash)}</td><td className="text-right font-mono">{money(r.paid)}</td></tr>)}
+                    <tr className="border-t-2 border-[#1F2A24] font-bold"><td className="py-2">Total</td><td className="text-right font-mono">{money(sum(branchRows, r => r.credit))}</td><td className="text-right font-mono">{money(sum(branchRows, r => r.cash))}</td><td className="text-right font-mono">{money(sum(branchRows, r => r.paid))}</td></tr>
+                  </tbody>
+                </table>
+              </ReportTable>
+              <div className="h-3" />
+              <ReportTable
+                title={`Supplier-wise${psBranch === "ALL" ? " (All branches)" : " — " + psBranch}`}
+                onExport={() => downloadCSV("purchase-summary.csv", toCSV(rows, [{ label: "Supplier", get: r => r.name }, { label: "Purchased", get: r => sum(r.list, p => p.amount) }, { label: "Paid", get: r => r.paid }]))}
+              >
+                {rows.length === 0 && <div className="text-sm text-[#8A9690]">Nothing found.</div>}
+                {rows.map(r => (
+                  <button key={r.key} onClick={() => setPsOpen(psOpen === r.key ? null : r.key)} className={`w-full flex justify-between items-center py-2.5 border-t border-[#EFEBDF] first:border-t-0 text-left ${psOpen === r.key ? "bg-[#F7F5F0]" : ""}`}>
+                    <div className="font-semibold text-sm">{r.name} <span className="text-[#8A9690] text-xs">▸ {r.list.length} items</span></div>
+                    <div className="text-right"><div className="font-mono font-bold text-sm">{money(sum(r.list, p => p.amount))}</div>{r.paid > 0 && <div className="text-[10px] text-[#2B6E63]">paid {money(r.paid)}</div>}</div>
+                  </button>
+                ))}
+                {rows.length > 0 && <div className="flex justify-between border-t-2 border-[#1F2A24] pt-2 mt-1 font-bold text-sm"><span>Total</span><span className="font-mono">{money(sum(rows, r => sum(r.list, p => p.amount)))}</span></div>}
+              </ReportTable>
+              {open && (
+                <div className="mt-3">
+                  <ReportTable title={`${open.name} — items`}>
+                    {itemsOf(open.list).map(i => (
+                      <div key={i.id} className="flex justify-between py-1.5 border-t border-[#EFEBDF] first:border-t-0 text-sm">
+                        <span className="font-medium">{itemName(i.id)}</span>
+                        <span className="font-mono">{i.qty} · {money(i.amount)}</span>
+                      </div>
+                    ))}
+                    <div className="text-[11px] uppercase font-semibold text-[#5C6B62] mt-3 mb-1">Each entry</div>
+                    {[...open.list].sort((a, b) => a.date < b.date ? 1 : -1).map(p => (
+                      <div key={p.id} className="flex justify-between py-1 text-xs text-[#5C6B62]">
+                        <span>{p.date} · {itemName(p.itemId)} · {p.branch || "Store"}</span>
+                        <span className="font-mono">{p.qty} × {p.rate} = {money(p.amount)}</span>
+                      </div>
+                    ))}
+                  </ReportTable>
+                </div>
+              )}
+            </div>
           );
         })()}
         {tab === "Cash Material" && (() => {
