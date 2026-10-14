@@ -1835,6 +1835,8 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
   const [supplierId, setSupplierId] = useState(db.suppliers[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
+  const payBranches = (session.branches && session.branches.length) ? session.branches : BRANCHES;
+  const [payBranch, setPayBranch] = useState(payBranches[0] || "Store");
   const supplier = db.suppliers.find(s => s.id === supplierId);
   const balance = supplierId ? balanceOf(supplierId) : 0;
   const lastBill = supplierId ? lastBillOf(supplierId) : null;
@@ -1842,7 +1844,7 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
 
   const save = () => {
     if (!supplierId || !amount || Number(amount) <= 0) { flash("Select supplier and enter amount", "error"); return; }
-    const rec = { id: uid("pay"), date: todayStr(), supplierId, amount: Number(amount), note, userId: session.id };
+    const rec = { id: uid("pay"), date: todayStr(), supplierId, amount: Number(amount), note, branch: payBranch, userId: session.id };
     const next = { ...db, payments: [rec, ...(db.payments || [])] };
     addLog(next, "Payment", `Paid ${amount} to ${supplier?.name}`);
     persist(next);
@@ -1876,6 +1878,11 @@ function PaymentScreen({ db, session, persist, addLog, flash, balanceOf, lastBil
           </div>
         </div>
 
+        <Field label="Branch">
+          <select className={selCls} value={payBranch} onChange={e => setPayBranch(e.target.value)}>
+            {payBranches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        </Field>
         <Field label="Payment Amount">
           <input className={numCls} type="number" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" />
         </Field>
@@ -1909,6 +1916,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
   const [adjQty, setAdjQty] = useState("");
   const [adjReason, setAdjReason] = useState("");
   const [ledgerSupplierId, setLedgerSupplierId] = useState(db.suppliers[0]?.id || "");
+  const [ledgerBranch, setLedgerBranch] = useState("ALL");
   const ledgerSupplier = db.suppliers.find(s => s.id === ledgerSupplierId);
   const [editPurchaseId, setEditPurchaseId] = useState(null);
   const [editPurchaseDraft, setEditPurchaseDraft] = useState({});
@@ -2423,28 +2431,34 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
             <select className={selCls + " mb-3"} value={ledgerSupplierId} onChange={e => setLedgerSupplierId(e.target.value)}>
               {db.suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
+            <select className={selCls + " mb-3"} value={ledgerBranch} onChange={e => setLedgerBranch(e.target.value)}>
+              <option value="ALL">All branches (Total)</option>
+              {myBranches.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
             {ledgerSupplier && (() => {
-              const purchaseTx = db.purchases.filter(p => p.supplierId === ledgerSupplierId && p.paymentMode !== "cash").map(p => ({
+              const brOk = (b) => ledgerBranch === "ALL" || (b || "Store") === ledgerBranch;
+              const purchaseTx = db.purchases.filter(p => p.supplierId === ledgerSupplierId && p.paymentMode !== "cash" && brOk(p.branch)).map(p => ({
                 date: p.date, type: "Purchase",
-                desc: `${itemName(p.itemId)} — ${p.qty} × ${p.rate}`,
+                desc: `${itemName(p.itemId)} — ${p.qty} × ${p.rate}` + (ledgerBranch === "ALL" ? ` [${p.branch || "Store"}]` : ""),
                 amount: p.amount,
               }));
-              const paymentTx = (db.payments || []).filter(x => x.supplierId === ledgerSupplierId).map(x => ({
-                date: x.date, type: "Payment", desc: x.note || "Payment", amount: -x.amount,
+              const paymentTx = (db.payments || []).filter(x => x.supplierId === ledgerSupplierId && brOk(x.branch)).map(x => ({
+                date: x.date, type: "Payment", desc: (x.note || "Payment") + (ledgerBranch === "ALL" ? ` [${x.branch || "Store"}]` : ""), amount: -x.amount,
               }));
               const allTx = [...purchaseTx, ...paymentTx]
                 .filter(t => !dateFilter || t.date === dateFilter)
                 .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
-              let running = Number(ledgerSupplier.openingBalance || 0);
+              const openingBal = brOk("Store") ? Number(ledgerSupplier.openingBalance || 0) : 0;
+              let running = openingBal;
               const openingRow = running !== 0 && !dateFilter ? [{ date: "—", type: "Opening", desc: "Opening balance", amount: running, balance: running }] : [];
               const withBalance = [...openingRow, ...allTx.map(t => { running += t.amount; return { ...t, balance: running }; })];
-              const opening = Number(ledgerSupplier.openingBalance || 0);
-              const allPurchaseAmts = db.purchases.filter(p => p.supplierId === ledgerSupplierId && p.paymentMode !== "cash");
-              const allPaymentAmts = (db.payments || []).filter(x => x.supplierId === ledgerSupplierId);
+              const opening = openingBal;
+              const allPurchaseAmts = db.purchases.filter(p => p.supplierId === ledgerSupplierId && p.paymentMode !== "cash" && brOk(p.branch));
+              const allPaymentAmts = (db.payments || []).filter(x => x.supplierId === ledgerSupplierId && brOk(x.branch));
               // Totals as of TODAY — the real current status, regardless of any date filter selected below.
               const totalPurchasesAll = allPurchaseAmts.reduce((a, p) => a + p.amount, 0);
               const totalPaidAll = allPaymentAmts.reduce((a, x) => a + x.amount, 0);
-              const bal = balanceOf(ledgerSupplierId);
+              const bal = opening + totalPurchasesAll - totalPaidAll;
               // When a specific date is selected: that day's own activity, and the running total up to
               // and including that date — both separate from "as of today" above.
               let dayBlock = null, uptoBlock = null;
@@ -2459,7 +2473,7 @@ function ReportsScreen({ db, session, persist, addLog, flash, stockOf, openingOf
               }
               return (
                 <ReportTable
-                  title={ledgerSupplier.name}
+                  title={ledgerSupplier.name + " — " + (ledgerBranch === "ALL" ? "All branches" : ledgerBranch)}
                   onExport={() => downloadCSV(`ledger-${ledgerSupplier.name}.csv`, toCSV(withBalance, [
                     { label: "Date", get: t => t.date }, { label: "Type", get: t => t.type },
                     { label: "Detail", get: t => t.desc }, { label: "Amount", get: t => t.amount }, { label: "Running Balance", get: t => t.balance },
